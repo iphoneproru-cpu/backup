@@ -173,8 +173,15 @@ if [[ "$MODE" == setup ]]; then
     a="$(ask "   IP или домен сервера для копий" "${REMOTE_HOST:--}")"; [[ "$a" == - ]] && a=""; REMOTE_HOST="$a"
     if [[ -n "$REMOTE_HOST" ]]; then
         SSH_PORT="$(ask "   Порт SSH" "$SSH_PORT")"
-        REMOTE_USER="$(ask "   Пользователь там (отдельный, только для копий)" "$REMOTE_USER")"
-        REMOTE_DIR="$(ask "   Папка там (в домашней папке пользователя)" "$REMOTE_DIR")"
+        echo
+        echo "   На сервере $REMOTE_HOST копии будут лежать у отдельного пользователя (логин),"
+        echo "   в его домашней папке, в подпапке. Например: логин backup, подпапка $HOST"
+        echo "   → копии в /home/backup/$HOST на $REMOTE_HOST."
+        REMOTE_USER="$(ask "   ЛОГИН пользователя на $REMOTE_HOST (создам, если нет)" "$REMOTE_USER")"
+        [[ "$REMOTE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "логин: латиница, цифры, - и _, например backup"
+        REMOTE_DIR="$(ask "   ПОДПАПКА для копий в /home/$REMOTE_USER/" "$REMOTE_DIR")"
+        [[ -n "$REMOTE_DIR" && "$REMOTE_DIR" != /* ]] || die "подпапка: имя без / в начале, например $HOST"
+        echo "   → копии будут в /home/$REMOTE_USER/$REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER)"
         KEEP_REMOTE="$(ask "   Сколько копий хранить там" "$KEEP_REMOTE")"
         [[ "$KEEP_REMOTE" =~ ^[1-9][0-9]*$ ]] || die "нужно число"
 
