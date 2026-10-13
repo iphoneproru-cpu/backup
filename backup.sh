@@ -7,6 +7,11 @@
 #   bash /opt/server-backup/backup.sh             сделать копию сейчас (cron запускает так же)
 #
 #   --no-upload        не отправлять на другой сервер (только локальная копия)
+#   --only ПРОЕКТ      только этот проект compose (и EXTRA_PATHS), без остального сервера; постоянно —
+#                      ONLY_PROJECTS="a b" в backup.conf
+#   --apply-cron       поставить расписание из backup.conf (CRON_TIME) без вопросов
+#   --check-remote     проверить доступ к серверу копий (код 0 — есть)
+#   --remote-cmds      показать команды для настройки сервера копий (создаёт ключ, если его нет)
 #   --test-notify      отправить проверочное сообщение в Telegram
 #   --skip ПРОЕКТ      не включать проект compose; постоянно — SKIP_PROJECTS="a b" в backup.conf
 #   --add ПУТЬ         добавить файл или папку; постоянно — EXTRA_PATHS="/x /y" в backup.conf
@@ -34,7 +39,9 @@ TG_TOKEN=""
 TG_CHAT=""
 TG_NOTIFY="all"          # all — успех и ошибки; errors — только ошибки
 SKIP_PROJECTS=""
+ONLY_PROJECTS=""         # если задано — только эти проекты compose и EXTRA_PATHS (без остального сервера)
 EXTRA_PATHS=""
+STATUS_FILE=""           # если задано — итог каждой копии (key=value) для внешних программ
 LOG="/var/log/server-backup.log"
 # shellcheck disable=SC1090
 [[ -f "$CONF" ]] && source "$CONF"
@@ -49,8 +56,12 @@ while (( $# )); do
         --test-notify) MODE="test-notify" ;;
         --no-upload) UPLOAD=0 ;;
         --skip) SKIP_PROJECTS+=" $2"; shift ;;
+        --only) ONLY_PROJECTS+=" $2"; shift ;;
+        --apply-cron) MODE="apply-cron" ;;
+        --check-remote) MODE="check-remote" ;;
+        --remote-cmds) MODE="remote-cmds" ;;
         --add) EXTRA_PATHS+=" $2"; shift ;;
-        -h|--help) sed -n '2,16p' "$SELF"; exit 0 ;;
+        -h|--help) sed -n '2,21p' "$SELF"; exit 0 ;;
         *) echo "Неизвестный параметр: $1 (см. --help)" >&2; exit 1 ;;
     esac
     shift
@@ -89,6 +100,48 @@ sftp_opts() { echo -P "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMo
 dest_host() { echo "$REMOTE_USER@$REMOTE_HOST"; }
 dest_dir() { echo "$REMOTE_DIR"; }
 sftp_ok() { echo "pwd" | sftp $(sftp_opts) -o StrictHostKeyChecking=accept-new -b - "$(dest_host)" >/dev/null 2>&1; }
+
+# ================================================================ общее для --setup и режимов без вопросов
+# remote_cmds: команды для сервера копий (выполнить там под root): пользователь без shell, папка, ключ только для sftp.
+remote_cmds() {
+    local pub auth; pub="$(cat "$SSH_KEY.pub")"; auth="restrict,command=\"internal-sftp\" $pub"
+    echo "set -e
+id $REMOTE_USER >/dev/null 2>&1 || useradd -m -s /usr/sbin/nologin $REMOTE_USER
+H=\$(getent passwd $REMOTE_USER | cut -d: -f6)
+mkdir -p \"\$H/.ssh\" \"\$H/$REMOTE_DIR\"
+touch \"\$H/.ssh/authorized_keys\"
+grep -qF '$(echo "$pub" | awk '{print $2}')' \"\$H/.ssh/authorized_keys\" || echo '$auth' >> \"\$H/.ssh/authorized_keys\"
+chmod 700 \"\$H/.ssh\"; chmod 600 \"\$H/.ssh/authorized_keys\"
+chown -R $REMOTE_USER: \"\$H/.ssh\" \"\$H/$REMOTE_DIR\"
+echo \"готово: \$H/$REMOTE_DIR\""
+}
+# ensure_key: ключ для отправки копий (без пароля — для cron).
+ensure_key() {
+    [[ -f "$SSH_KEY" ]] || { mkdir -p "$(dirname "$SSH_KEY")"; ssh-keygen -t ed25519 -N "" -C "server-backup-$HOST" -f "$SSH_KEY" -q; }
+    [[ -f "$SSH_KEY.pub" ]] || ssh-keygen -y -f "$SSH_KEY" > "$SSH_KEY.pub"
+}
+# apply_cron: строка cron из CRON_TIME (часы сервера); печатает её.
+apply_cron() {
+    local line
+    line="${CRON_TIME#*:} ${CRON_TIME%:*} * * * bash $SELF >/dev/null 2>&1  # server-backup"
+    line="$(echo "$line" | sed -E 's/^0([0-9]) /\1 /; s/ 0([0-9]) / \1 /')"
+    { crontab -l 2>/dev/null | grep -vF "$SELF" || true; echo "$line"; } | crontab -
+    echo "$line"
+}
+
+case "$MODE" in
+    apply-cron)
+        [[ "$CRON_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "CRON_TIME: ЧЧ:ММ"
+        echo "cron: $(apply_cron)"; exit 0 ;;
+    check-remote)
+        [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
+        [[ -f "$SSH_KEY" ]] || die "нет ключа $SSH_KEY"
+        if sftp_ok; then echo "доступ к $(dest_host) (порт $SSH_PORT) есть"; exit 0; fi
+        die "нет доступа к $(dest_host) (порт $SSH_PORT) по ключу $SSH_KEY" ;;
+    remote-cmds)
+        [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
+        ensure_key; remote_cmds; exit 0 ;;
+esac
 
 # ================================================================ настройка
 if [[ "$MODE" == setup ]]; then
@@ -132,18 +185,7 @@ if [[ "$MODE" == setup ]]; then
             SSH_KEY="/root/.ssh/server_backup_ed25519"
             [[ -f "$SSH_KEY" ]] || { ssh-keygen -t ed25519 -N "" -C "server-backup-$HOST" -f "$SSH_KEY" -q; echo "   ключ создан: $SSH_KEY"; }
         fi
-        PUB="$(cat "$SSH_KEY.pub")"
-        AUTH_LINE="restrict,command=\"internal-sftp\" $PUB"
-        # Команды для того сервера: пользователь без shell, папка, ключ только для sftp.
-        REMOTE_CMDS="set -e
-id $REMOTE_USER >/dev/null 2>&1 || useradd -m -s /usr/sbin/nologin $REMOTE_USER
-H=\$(getent passwd $REMOTE_USER | cut -d: -f6)
-mkdir -p \"\$H/.ssh\" \"\$H/$REMOTE_DIR\"
-touch \"\$H/.ssh/authorized_keys\"
-grep -qF '$(echo "$PUB" | awk '{print $2}')' \"\$H/.ssh/authorized_keys\" || echo '$AUTH_LINE' >> \"\$H/.ssh/authorized_keys\"
-chmod 700 \"\$H/.ssh\"; chmod 600 \"\$H/.ssh/authorized_keys\"
-chown -R $REMOTE_USER: \"\$H/.ssh\" \"\$H/$REMOTE_DIR\"
-echo \"готово: \$H/$REMOTE_DIR\""
+        REMOTE_CMDS="$(remote_cmds)"
 
         echo
         echo "   Проверяю доступ к $(dest_host) (порт $SSH_PORT)..."
@@ -205,9 +247,7 @@ echo \"готово: \$H/$REMOTE_DIR\""
     } > "$CONF"
     chmod 600 "$CONF"
 
-    line="${CRON_TIME#*:} ${CRON_TIME%:*} * * * bash $SELF >/dev/null 2>&1  # server-backup"
-    line="$(echo "$line" | sed -E 's/^0([0-9]) /\1 /; s/ 0([0-9]) / \1 /')"
-    { crontab -l 2>/dev/null | grep -vF "$SELF" || true; echo "$line"; } | crontab -
+    line="$(apply_cron)"
     others="$(crontab -l | grep -vF "$SELF" | grep -iE 'backup' || true)"
 
     step "Готово"
@@ -233,6 +273,19 @@ if [[ "$MODE" == test-notify ]]; then
 fi
 
 # ================================================================ подготовка
+# write_status: итог копии для внешних программ (STATUS_FILE), по строке key=value.
+write_status() {  # write_status СОСТОЯНИЕ [key=value ...]
+    [[ -n "$STATUS_FILE" ]] || return 0
+    local f="$STATUS_FILE" kv
+    mkdir -p "$(dirname "$f")"
+    {
+        echo "status=$1"; shift
+        echo "host=$HOST"
+        echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        for kv in "$@"; do echo "${kv//$'\n'/ }"; done
+    } > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
 WORK="$(mktemp -d)"
 TS="$(date -u +%Y%m%d-%H%M%S)"
 NAME="server-backup-$HOST-$TS"
@@ -249,10 +302,14 @@ if [[ "$MODE" == backup ]]; then
     fi
     exec > >(tee -a "$LOG" "$RUNLOG") 2>&1
     echo; echo "################ $(date '+%Y-%m-%d %H:%M:%S %Z') — резервная копия $HOST"
+    write_status running "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
 
 on_exit() {
     local rc=$?
+    if [[ "$MODE" == backup ]] && (( rc )); then
+        write_status failed "failed_at=${FAILED_AT:-?}" "code=$rc" "error=$(tail -n 3 "$RUNLOG" 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
+    fi
     if [[ "$MODE" == backup ]] && (( rc )) && [[ "$TG_MODE" != off ]]; then
         sleep 1
         tg_send "❌ Резервная копия $HOST НЕ сделана
@@ -314,8 +371,10 @@ FAILED_AT="поиск контейнеров"
     echo "created_utc=$TS"
     echo "hostname=$HOST"
     echo "ips=$(hostname -I | xargs)"
-    echo "bot_commit=$(git -C /opt/remnashop-src rev-parse HEAD 2>/dev/null || true)"
-    echo "bot_branch=$(git -C /opt/remnashop-src rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [[ -z "${ONLY_PROJECTS// /}" ]]; then
+        echo "bot_commit=$(git -C /opt/remnashop-src rev-parse HEAD 2>/dev/null || true)"
+        echo "bot_branch=$(git -C /opt/remnashop-src rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    fi
 } > "$B/MANIFEST"
 # имя|образ|id образа|digest|проект|сервис|папка|файлы compose|состояние
 for c in $(docker ps -a --format '{{.Names}}'); do
@@ -336,6 +395,13 @@ for sp in $SKIP_PROJECTS; do
     awk -F'|' -v p="$sp" '$5!=p' "$B/containers.txt" > "$B/c.tmp" && mv "$B/c.tmp" "$B/containers.txt"
 done
 [[ -z "${SKIP_PROJECTS// /}" ]] || echo "skipped=${SKIP_PROJECTS# }" >> "$B/MANIFEST"
+ONLY=0
+if [[ -n "${ONLY_PROJECTS// /}" ]]; then  # только эти проекты: остальные контейнеры и разделы сервера не трогаем
+    ONLY=1
+    awk -F'|' -v l=" $ONLY_PROJECTS " 'index(l, " " $5 " ") && $5 != ""' "$B/containers.txt" > "$B/c.tmp" && mv "$B/c.tmp" "$B/containers.txt"
+    for op in $ONLY_PROJECTS; do grep -q "^[^|]*|[^|]*|[^|]*|[^|]*|$op|" "$B/containers.txt" || warn "проект $op не найден среди контейнеров"; done
+    echo "only=${ONLY_PROJECTS# }" >> "$B/MANIFEST"
+fi
 
 # Порядок: панель, бот, остальные.
 mapfile -t PROJECTS < <(awk -F'|' '$5!="" {
@@ -424,6 +490,8 @@ for proj in "${PROJECTS[@]}"; do
 done
 others="$(awk -F'|' '$5=="" {printf "%s ", $1}' "$B/containers.txt")"
 [[ -z "$others" ]] || { echo; echo "   (контейнеры не из compose, не копируются: $others)"; }
+
+if (( ! ONLY )); then  # ---------------------------------------- разделы всего сервера
 
 # ---------------------------------------------------------------- исходники и прочее в /opt
 OPT_OTHER=()
@@ -514,6 +582,7 @@ if [[ -d /root/.ssh ]]; then
     line "/root/.ssh: ключи доступа и деплой-ключи (пар ключей: $(find /root/.ssh -maxdepth 1 -type f -name '*.pub' | wc -l))"
     add_path /root/.ssh
 fi
+fi  # разделы всего сервера
 for p in $EXTRA_PATHS; do
     [[ -e "$p" ]] || { warn "$p (из --add/EXTRA_PATHS) не найден"; continue; }
     item "Дополнительно: $p — $(human "$p")"; add_path "$p"
@@ -524,8 +593,13 @@ TAR_EX=(--exclude=opt/containerd --exclude='opt/*/logs' --exclude='opt/*/backups
         --exclude='*.log' --exclude="${OUT_DIR#/}" --exclude='root/restore-*' --exclude='root/.cache')
 for e in "${EXCLUDES[@]}" $(printf '%s\n' "${SKIP_DIRS[@]}" | sort -u); do TAR_EX+=("--exclude=${e#/}"); done
 echo
-echo "Не кладу: логи, папки backup(s) внутри /opt (старые дампы и архивы других скриптов),"
-echo "файлы баз (вместо них дампы), /opt/containerd, $OUT_DIR${SKIP_PROJECTS:+, проекты:$SKIP_PROJECTS}."
+if (( ONLY )); then
+    echo "Только проекты:${ONLY_PROJECTS}${EXTRA_PATHS:+ и дополнительные пути}. Остальное на сервере не копируется"
+    echo "(другие проекты, /opt, сайты, сертификаты, cron, /root/.ssh)."
+else
+    echo "Не кладу: логи, папки backup(s) внутри /opt (старые дампы и архивы других скриптов),"
+    echo "файлы баз (вместо них дампы), /opt/containerd, $OUT_DIR${SKIP_PROJECTS:+, проекты:$SKIP_PROJECTS}."
+fi
 } > "$SUMMARY_FILE"   # не через pipe: переменные из блока нужны дальше
 cat "$SUMMARY_FILE"
 
@@ -636,6 +710,8 @@ elif (( UPLOAD )); then
     warn "отправка на другой сервер не настроена — копия только здесь (bash $SELF --setup)"
 fi
 FAILED_AT=""
+write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=${UPLOADED:+$(dest_host):$(dest_dir)}" \
+    "local_count=$LOCAL_N" "warnings=$(printf '%s; ' "${WARNINGS[@]}" | sed 's/; $//')"
 
 # ================================================================ отчёт
 if [[ "$TG_MODE" != off && "$TG_NOTIFY" == all ]]; then

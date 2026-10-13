@@ -48,7 +48,7 @@ B="$(find "$R" -mindepth 1 -maxdepth 1 -type d -name 'server-backup-*' | head -1
 [[ ! -f "$B/SUMMARY.txt" ]] || { echo; sed -n '3,200p' "$B/SUMMARY.txt" | sed '/^Не кладу/,$d'; echo; }
 mf() { grep -E "^$1=" "$B/MANIFEST" | cut -d= -f2-; }
 echo "сделан: $(mf created_utc) UTC на $(mf hostname) ($(mf ips))"
-echo "бот: ветка $(mf bot_branch), коммит $(mf bot_commit | cut -c1-7)"
+[[ -z "$(mf bot_commit)" ]] || echo "бот: ветка $(mf bot_branch), коммит $(mf bot_commit | cut -c1-7)"
 echo "распакован в $R"
 
 # Проекты compose: имя|папка|файлы — в порядке появления.

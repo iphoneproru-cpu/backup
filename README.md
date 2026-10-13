@@ -116,6 +116,23 @@ bash /opt/server-backup/backup.sh --add /root/notes     # добавить па�
 Постоянно пропускать проекты или добавлять папки — в `backup.conf`:
 `SKIP_PROJECTS="a b"`, `EXTRA_PATHS="/root/notes /etc/something"`.
 
+### Только один проект
+
+`--only remnadiag` (постоянно — `ONLY_PROJECTS="remnadiag"` в `backup.conf`): в копию идут только контейнеры
+этого проекта (его папка, дампы баз, тома) и `EXTRA_PATHS`. Остальное на сервере — другие проекты, `/opt`, сайты,
+сертификаты, cron, ufw, `/root/.ssh` — не копируется. Так делает копии дашборд RemnaDiag.
+
+### Без вопросов (для программ)
+
+```bash
+bash /opt/server-backup/backup.sh --apply-cron     # поставить расписание из backup.conf (CRON_TIME, часы сервера)
+bash /opt/server-backup/backup.sh --check-remote   # есть ли доступ к серверу копий (код 0 — есть)
+bash /opt/server-backup/backup.sh --remote-cmds    # команды для того сервера (создаст ключ, если его нет)
+```
+
+`STATUS_FILE=/путь` в `backup.conf` — после каждой копии там итог по строке `key=value`: `status` (`running`,
+`ok`, `failed`), `at`, `archive`, `size`, `uploaded`, `failed_at`, `error`, `warnings`.
+
 - Лог всех запусков: `/var/log/server-backup.log` (сам обрезается после 5 МБ).
 - Два запуска одновременно не пойдут — второй сразу завершится.
 - Если свободно меньше 500 МБ, копия не делается (и приходит сообщение об ошибке).
