@@ -10,6 +10,7 @@
 #   --only ПРОЕКТ      только этот проект compose (и EXTRA_PATHS), без остального сервера; постоянно —
 #                      ONLY_PROJECTS="a b" в backup.conf
 #   --apply-cron       поставить расписание из backup.conf (CRON_TIME) без вопросов
+#   --remove-cron      снять расписание
 #   --check-remote     проверить доступ к серверу копий (код 0 — есть)
 #   --remote-cmds      показать команды для настройки сервера копий (создаёт ключ, если его нет)
 #   --test-notify      отправить проверочное сообщение в Telegram
@@ -58,10 +59,11 @@ while (( $# )); do
         --skip) SKIP_PROJECTS+=" $2"; shift ;;
         --only) ONLY_PROJECTS+=" $2"; shift ;;
         --apply-cron) MODE="apply-cron" ;;
+        --remove-cron) MODE="remove-cron" ;;
         --check-remote) MODE="check-remote" ;;
         --remote-cmds) MODE="remote-cmds" ;;
         --add) EXTRA_PATHS+=" $2"; shift ;;
-        -h|--help) sed -n '2,21p' "$SELF"; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$SELF"; exit 0 ;;
         *) echo "Неизвестный параметр: $1 (см. --help)" >&2; exit 1 ;;
     esac
     shift
@@ -133,6 +135,9 @@ case "$MODE" in
     apply-cron)
         [[ "$CRON_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "CRON_TIME: ЧЧ:ММ"
         echo "cron: $(apply_cron)"; exit 0 ;;
+    remove-cron)
+        { crontab -l 2>/dev/null | grep -vF "$SELF" || true; } | crontab -
+        echo "расписание снято"; exit 0 ;;
     check-remote)
         [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
         [[ -f "$SSH_KEY" ]] || die "нет ключа $SSH_KEY"

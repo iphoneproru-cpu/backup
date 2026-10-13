@@ -126,6 +126,7 @@ bash /opt/server-backup/backup.sh --add /root/notes     # добавить па�
 
 ```bash
 bash /opt/server-backup/backup.sh --apply-cron     # поставить расписание из backup.conf (CRON_TIME, часы сервера)
+bash /opt/server-backup/backup.sh --remove-cron    # снять расписание
 bash /opt/server-backup/backup.sh --check-remote   # есть ли доступ к серверу копий (код 0 — есть)
 bash /opt/server-backup/backup.sh --remote-cmds    # команды для того сервера (создаст ключ, если его нет)
 ```
