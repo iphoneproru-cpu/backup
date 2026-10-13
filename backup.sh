@@ -102,6 +102,13 @@ sftp_opts() { echo -P "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMo
 dest_host() { echo "$REMOTE_USER@$REMOTE_HOST"; }
 dest_dir() { echo "$REMOTE_DIR"; }
 sftp_ok() { echo "pwd" | sftp $(sftp_opts) -o StrictHostKeyChecking=accept-new -b - "$(dest_host)" >/dev/null 2>&1; }
+# remote_path: полный путь папки копий там (домашняя папка пользователя + REMOTE_DIR), если доступ есть.
+remote_path() {
+    local home
+    home="$(echo "pwd" | sftp $(sftp_opts) -o StrictHostKeyChecking=accept-new -b - "$(dest_host)" 2>/dev/null \
+        | sed -n 's/^Remote working directory: //p')"
+    [[ -n "$home" ]] && echo "${home%/}/$REMOTE_DIR"
+}
 
 # ================================================================ общее для --setup и режимов без вопросов
 # remote_cmds: команды для сервера копий (выполнить там под root): пользователь без shell, папка, ключ только для sftp.
@@ -141,7 +148,7 @@ case "$MODE" in
     check-remote)
         [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
         [[ -f "$SSH_KEY" ]] || die "нет ключа $SSH_KEY"
-        if sftp_ok; then echo "доступ к $(dest_host) (порт $SSH_PORT) есть"; exit 0; fi
+        if path="$(remote_path)"; then echo "доступ к $(dest_host) (порт $SSH_PORT) есть, копии будут в $path"; exit 0; fi
         die "нет доступа к $(dest_host) (порт $SSH_PORT) по ключу $SSH_KEY" ;;
     remote-cmds)
         [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
@@ -164,8 +171,10 @@ if [[ "$MODE" == setup ]]; then
     CRON_TIME="$(msk2srv "$t")"
     echo "   → по часам сервера: $CRON_TIME"
 
-    echo; echo "2) Хранение на этом сервере ($OUT_DIR)"
-    KEEP_LOCAL="$(ask "   Сколько последних копий хранить" "$KEEP_LOCAL")"
+    echo; echo "2) Хранение на этом сервере"
+    OUT_DIR="$(ask "   Папка для копий на этом сервере" "$OUT_DIR")"
+    [[ "$OUT_DIR" == /* && "$OUT_DIR" != / && "$OUT_DIR" != *" "* ]] || die "папка: полный путь без пробелов, например /root/backups"
+    KEEP_LOCAL="$(ask "   Сколько последних копий хранить в $OUT_DIR" "$KEEP_LOCAL")"
     [[ "$KEEP_LOCAL" =~ ^[1-9][0-9]*$ ]] || die "нужно число"
 
     echo; echo "3) Копия на другой сервер (по SSH/SFTP)"
@@ -175,13 +184,13 @@ if [[ "$MODE" == setup ]]; then
         SSH_PORT="$(ask "   Порт SSH" "$SSH_PORT")"
         echo
         echo "   На сервере $REMOTE_HOST копии будут лежать у отдельного пользователя (логин),"
-        echo "   в его домашней папке, в подпапке. Например: логин backup, подпапка $HOST"
+        echo "   в его домашней папке (обычно /home/логин), в подпапке. Например: логин backup, подпапка $HOST"
         echo "   → копии в /home/backup/$HOST на $REMOTE_HOST."
         REMOTE_USER="$(ask "   ЛОГИН пользователя на $REMOTE_HOST (создам, если нет)" "$REMOTE_USER")"
         [[ "$REMOTE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "логин: латиница, цифры, - и _, например backup"
-        REMOTE_DIR="$(ask "   ПОДПАПКА для копий в /home/$REMOTE_USER/" "$REMOTE_DIR")"
+        REMOTE_DIR="$(ask "   ПОДПАПКА для копий в домашней папке $REMOTE_USER" "$REMOTE_DIR")"
         [[ -n "$REMOTE_DIR" && "$REMOTE_DIR" != /* ]] || die "подпапка: имя без / в начале, например $HOST"
-        echo "   → копии будут в /home/$REMOTE_USER/$REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER)"
+        echo "   → копии будут в ~$REMOTE_USER/$REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER); точный путь покажу после проверки доступа"
         KEEP_REMOTE="$(ask "   Сколько копий хранить там" "$KEEP_REMOTE")"
         [[ "$KEEP_REMOTE" =~ ^[1-9][0-9]*$ ]] || die "нужно число"
 
@@ -217,7 +226,7 @@ if [[ "$MODE" == setup ]]; then
         done
         if [[ -n "$REMOTE_HOST" ]]; then
             printf -- '-mkdir %s\n' "$REMOTE_DIR" | sftp $(sftp_opts) -b - "$(dest_host)" >/dev/null 2>&1 || true
-            echo "   доступ есть: копии будут в $(dest_host):$REMOTE_DIR"
+            echo "   доступ есть: копии будут в $(remote_path || echo "~$REMOTE_USER/$REMOTE_DIR") на $REMOTE_HOST"
             if ssh -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" true >/dev/null 2>&1 \
                 && [[ "$(ssh -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" echo shell 2>/dev/null)" == shell ]]; then
                 echo "   ! этим ключом там доступна командная строка — лучше ограничить ключ (вариант 2 покажет как)"
