@@ -63,7 +63,7 @@ while (( $# )); do
         --check-remote) MODE="check-remote" ;;
         --remote-cmds) MODE="remote-cmds" ;;
         --add) EXTRA_PATHS+=" $2"; shift ;;
-        -h|--help) sed -n '2,22p' "$SELF"; exit 0 ;;
+        -h|--help) sed -n '2,21p' "$SELF"; exit 0 ;;
         *) echo "Неизвестный параметр: $1 (см. --help)" >&2; exit 1 ;;
     esac
     shift
