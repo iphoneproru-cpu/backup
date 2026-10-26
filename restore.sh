@@ -6,19 +6,22 @@
 #   --yes      не задавать вопросов (кроме установки docker)
 #   --force    продолжить, даже если на сервере уже есть контейнеры с такими именами
 #              (базы с данными скрипт не перезаписывает и с --force)
+#   --no-start всё восстановить, но ничего не запускать: после заливки баз остановить их,
+#              cron не ставить (перенос заранее, пока старый сервер ещё главный)
 #
 # Порядок: файлы (/opt, сертификаты, сайт, ~/.ssh — без замены существующих ключей) → те же
 # версии образов (по digest) → контейнеры compose (создаются, не запускаются) → данные valkey →
 # базы PostgreSQL из дампов → запуск всего → cron → проверка доменов.
 set -euo pipefail
 
-ARCHIVE=""; CHECK_ONLY=0; YES=0; FORCE=0
+ARCHIVE=""; CHECK_ONLY=0; YES=0; FORCE=0; NO_START=0
 while (( $# )); do
     case "$1" in
         --check) CHECK_ONLY=1 ;;
         --yes) YES=1 ;;
         --force) FORCE=1 ;;
-        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        --no-start) NO_START=1 ;;
+        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
         -*) echo "Неизвестный параметр: $1" >&2; exit 1 ;;
         *) ARCHIVE="$1" ;;
     esac
@@ -206,6 +209,19 @@ while IFS='|' read -r c proj svc user db pgv; do
         "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
     echo "  $c: база $db восстановлена, таблиц: $tables"
 done < "$B/db/list.txt"
+
+if (( NO_START )); then
+    step "Без запуска (--no-start)"
+    in_order stop >/dev/null 2>&1 || true
+    docker ps -a --format '{{.Names}}|{{.Status}}' | grep -Ff <(cut -d'|' -f1 "$B/containers.txt") \
+        | sed -e 's/|/   /' -e 's/^/  /'
+    echo
+    echo "Всё восстановлено, контейнеры созданы и остановлены, cron не ставился."
+    echo "Распакованная копия: $R. Запуск, когда старый сервер остановлен:"
+    echo "  каждый проект: cd ПАПКА && docker compose up -d  (сначала панель — она создаёт сеть)"
+    echo "  cron из копии: $B/crontab.txt"
+    exit 0
+fi
 
 step "Запуск"
 in_order up -d || die "не все проекты запустились. Логи: $R/compose-*.log"
