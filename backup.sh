@@ -610,8 +610,11 @@ for p in $EXTRA_PATHS; do
 done
 
 # ---------------------------------------------------------------- исключения
-TAR_EX=(--exclude=opt/containerd --exclude='opt/*/logs' --exclude='opt/*/backups' --exclude='opt/*/backup'
-        --exclude='*.log' --exclude="${OUT_DIR#/}" --exclude='root/restore-*' --exclude='root/.cache')
+# '*.log' — на любой глубине; остальные пути — от корня и '*' только в одной папке: без --anchored /
+# --no-wildcards-match-slash 'opt/*/backup' совпадал и с opt/remnashop-src/src/…/backup (исходники бота).
+TAR_EX=(--exclude='*.log' --anchored --no-wildcards-match-slash
+        --exclude=opt/containerd --exclude='opt/*/logs' --exclude='opt/*/backups' --exclude='opt/*/backup'
+        --exclude="${OUT_DIR#/}" --exclude='root/restore-*' --exclude='root/.cache')
 for e in "${EXCLUDES[@]}" $(printf '%s\n' "${SKIP_DIRS[@]}" | sort -u); do TAR_EX+=("--exclude=${e#/}"); done
 echo
 if (( ONLY )); then
