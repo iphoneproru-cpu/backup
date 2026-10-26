@@ -35,7 +35,7 @@ TG_NOTIFY="all"          # all — успех и ошибки; errors — тол
 SKIP_PROJECTS=""
 ONLY_PROJECTS=""         # если задано — только эти проекты compose и EXTRA_PATHS (без остального сервера)
 EXTRA_PATHS=""
-STATUS_FILE=""           # если задано — итог каждой копии (key=value) для внешних программ
+STATUS_FILE=""           # итог каждой копии (key=value) для внешних программ; пусто — $OUT_DIR/.last-run
 LOG="/var/log/server-backup.log"
 # shellcheck disable=SC1090
 [[ -f "$CONF" ]] && source "$CONF"
@@ -420,8 +420,10 @@ fi
 
 # ================================================================ подготовка
 # write_status: итог копии для внешних программ (STATUS_FILE), по строке key=value.
+# Итог (ok / failed) ещё и кладётся рядом с копиями на сервер копий — status-СЕРВЕР.txt: по нему
+# RemnaDiag следит за копиями сервера без агента (только чтение, без доступа к самому серверу).
+STATUS_FILE="${STATUS_FILE:-$OUT_DIR/.last-run}"
 write_status() {  # write_status СОСТОЯНИЕ [key=value ...]
-    [[ -n "$STATUS_FILE" ]] || return 0
     local f="$STATUS_FILE" kv
     mkdir -p "$(dirname "$f")"
     {
@@ -430,6 +432,11 @@ write_status() {  # write_status СОСТОЯНИЕ [key=value ...]
         echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         for kv in "$@"; do echo "${kv//$'\n'/ }"; done
     } > "$f.tmp" && mv "$f.tmp" "$f"
+}
+push_status() {  # итог — на сервер копий (если он настроен); ошибки не мешают копии
+    [[ -n "$DEST" && -f "$STATUS_FILE" ]] || return 0
+    printf 'put %s %s/status-%s.txt\n' "$STATUS_FILE" "$(dest_dir)" "$HOST" \
+        | timeout 60 sftp $(sftp_opts) -b - "$(dest_host)" >/dev/null 2>&1 || true
 }
 
 WORK="$(mktemp -d)"
@@ -455,6 +462,7 @@ on_exit() {
     local rc=$?
     if [[ "$MODE" == backup ]] && (( rc )); then
         write_status failed "failed_at=${FAILED_AT:-?}" "code=$rc" "error=$(tail -n 3 "$RUNLOG" 2>/dev/null | nocolor | tr '\n' ' ' | cut -c1-300)"
+        push_status
     fi
     if [[ "$MODE" == backup ]] && (( rc )) && [[ "$TG_MODE" != off ]]; then
         sleep 1
@@ -861,6 +869,7 @@ fi
 FAILED_AT=""
 write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=${UPLOADED:+$(dest_host):$(dest_dir)}" \
     "local_count=$LOCAL_N" "warnings=$(printf '%s; ' "${WARNINGS[@]}" | sed 's/; $//')"
+push_status
 
 # ================================================================ отчёт
 if [[ "$TG_MODE" != off && "$TG_NOTIFY" == all ]]; then
