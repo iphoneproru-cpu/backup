@@ -18,7 +18,7 @@ set -euo pipefail
 BASE="${STORAGE_BASE:-/srv/backup}"  # STORAGE_BASE — только для проверки
 KEYS=/etc/ssh/backup-keys
 GROUP=sftpbackup
-SSHD_CONF=/etc/ssh/sshd_config.d/50-backup-chroot.conf
+SSHD_CONF=/etc/ssh/sshd_config  # блок Match — в самом конце: в sshd_config.d он захватил бы следующие строки
 CRON=/etc/cron.d/backup-storage
 TOOL=/usr/local/sbin/backup-storage
 
@@ -33,9 +33,12 @@ valid_ip() { [[ -z "$1" || "$1" =~ ^[0-9a-fA-F.:/]+$ ]] || die "IP: адрес �
 base() {
     getent group "$GROUP" >/dev/null || groupadd --system "$GROUP"
     install -d -m 755 -o root -g root "$BASE" "$BASE/watch" "$KEYS"
-    if [[ ! -f "$SSHD_CONF" ]]; then
-        cat > "$SSHD_CONF" <<EOF
-# Пользователи сервера копий (storage-setup.sh): только SFTP, каждый в своей папке.
+    if ! grep -q '^# >>> backup-storage' "$SSHD_CONF"; then
+        local bak="$SSHD_CONF.bak-$(date +%Y%m%d-%H%M%S)"
+        cp -a "$SSHD_CONF" "$bak"
+        cat >> "$SSHD_CONF" <<EOF
+
+# >>> backup-storage (storage-setup.sh): пользователи сервера копий — только SFTP, каждый в своей папке
 Match Group $GROUP
     ChrootDirectory %h
     ForceCommand internal-sftp
@@ -45,13 +48,14 @@ Match Group $GROUP
     AllowAgentForwarding no
     X11Forwarding no
     PermitTTY no
+# <<< backup-storage
 EOF
         if ! sshd -t 2>/tmp/sshd-test.log; then
-            rm -f "$SSHD_CONF"
-            die "sshd не принял настройку (файл убран, ssh не трогали): $(cat /tmp/sshd-test.log)"
+            cp -a "$bak" "$SSHD_CONF"
+            die "sshd не принял настройку — вернул как было ($bak): $(cat /tmp/sshd-test.log)"
         fi
         systemctl reload ssh 2>/dev/null || systemctl reload sshd
-        echo "sshd: $SSHD_CONF (chroot, только SFTP)"
+        echo "sshd: блок Match Group $GROUP в конце $SSHD_CONF (копия: $bak)"
     fi
     if [[ "$(realpath "$0")" != "$TOOL" ]]; then install -m 700 "$0" "$TOOL"; fi
     if [[ ! -f "$CRON" ]]; then
