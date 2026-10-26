@@ -2,20 +2,13 @@
 # Полная резервная копия сервера: панель Remnawave, бот Remnashop, nginx, сайт, сертификаты, cron.
 # Что где лежит, скрипт находит сам по запущенным контейнерам и перед копией объясняет по пунктам.
 #
-#   bash /opt/server-backup/backup.sh --setup     настройка: время, ротация, отправка, Telegram, cron
-#   bash /opt/server-backup/backup.sh --plan      только показать, что попадёт в копию (ничего не делает)
-#   bash /opt/server-backup/backup.sh             сделать копию сейчас (cron запускает так же)
+#   bash /opt/server-backup/backup.sh     меню: копия сейчас, просмотр, настройка, расписание,
+#                                         сервер копий, Telegram
 #
-#   --no-upload        не отправлять на другой сервер (только локальная копия)
-#   --only ПРОЕКТ      только этот проект compose (и EXTRA_PATHS), без остального сервера; постоянно —
-#                      ONLY_PROJECTS="a b" в backup.conf
-#   --apply-cron       поставить расписание из backup.conf (CRON_TIME) без вопросов
-#   --remove-cron      снять расписание
-#   --check-remote     проверить доступ к серверу копий (код 0 — есть)
-#   --remote-cmds      показать команды для настройки сервера копий (создаёт ключ, если его нет)
-#   --test-notify      отправить проверочное сообщение в Telegram
-#   --skip ПРОЕКТ      не включать проект compose; постоянно — SKIP_PROJECTS="a b" в backup.conf
-#   --add ПУТЬ         добавить файл или папку; постоянно — EXTRA_PATHS="/x /y" в backup.conf
+# Без терминала (cron) тот же запуск сразу делает копию. Ключи ниже — служебные, для cron и
+# агента RemnaDiag; человеку они не нужны, всё есть в меню:
+#   --setup --plan --no-upload --only П --skip П --add ПУТЬ --apply-cron --remove-cron
+#   --check-remote --remote-cmds --test-notify
 #
 # Настройки: backup.conf рядом со скриптом. Лог: /var/log/server-backup.log.
 # Восстановление на чистом сервере: restore.sh (лежит рядом и внутри каждого архива).
@@ -49,7 +42,7 @@ LOG="/var/log/server-backup.log"
 REMOTE_DIR="${REMOTE_DIR:-$(hostname)}"
 DEST=""; [[ -z "$REMOTE_HOST" ]] || DEST="$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR"
 
-MODE="backup"; UPLOAD=1
+MODE="backup"; UPLOAD=1; ARGC=$#
 while (( $# )); do
     case "$1" in
         --setup) MODE="setup" ;;
@@ -63,15 +56,25 @@ while (( $# )); do
         --check-remote) MODE="check-remote" ;;
         --remote-cmds) MODE="remote-cmds" ;;
         --add) EXTRA_PATHS+=" $2"; shift ;;
-        -h|--help) sed -n '2,21p' "$SELF"; exit 0 ;;
-        *) echo "Неизвестный параметр: $1 (см. --help)" >&2; exit 1 ;;
+        -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;
+        *) echo "Неизвестный параметр: $1 (запустите без параметров — откроется меню)" >&2; exit 1 ;;
     esac
     shift
 done
+# без повторов: проект из backup.conf, выбранный ещё раз разово
+ONLY_PROJECTS="$(printf '%s\n' $ONLY_PROJECTS | awk 'NF && !seen[$0]++' | xargs || true)"
+SKIP_PROJECTS="$(printf '%s\n' $SKIP_PROJECTS | awk 'NF && !seen[$0]++' | xargs || true)"
 
-step() { echo; echo "==> $*"; }
-warn() { echo "  ! $*"; WARNINGS+=("$*"); }
-die() { echo; echo "ОШИБКА: $*" >&2; exit 1; }
+# Цвета — только в терминале (cron и агент RemnaDiag получают чистый текст).
+if [[ -t 1 ]]; then
+    C_R=$'\e[0m' C_B=$'\e[1m' C_D=$'\e[2m' C_RED=$'\e[31m' C_GRN=$'\e[32m' C_YEL=$'\e[33m' C_BLU=$'\e[34m' C_MAG=$'\e[35m' C_CYN=$'\e[36m'
+else
+    C_R="" C_B="" C_D="" C_RED="" C_GRN="" C_YEL="" C_BLU="" C_MAG="" C_CYN=""
+fi
+nocolor() { sed -u $'s/\e\\[[0-9;]*m//g'; }
+step() { echo; echo "${C_B}${C_CYN}==>${C_R}${C_B} $*${C_R}"; }
+warn() { echo "  ${C_YEL}! $*${C_R}"; WARNINGS+=("$*"); }
+die() { echo; echo "${C_B}${C_RED}ОШИБКА:${C_R}${C_RED} $*${C_R}" >&2; exit 1; }
 WARNINGS=()
 [[ $EUID -eq 0 ]] || die "запустите от root"
 HOST="$(hostname)"
@@ -141,23 +144,145 @@ apply_cron() {
 case "$MODE" in
     apply-cron)
         [[ "$CRON_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "CRON_TIME: ЧЧ:ММ"
-        echo "cron: $(apply_cron)"; exit 0 ;;
+        echo "${C_GRN}cron: $(apply_cron)${C_R}"; exit 0 ;;
     remove-cron)
         { crontab -l 2>/dev/null | grep -vF "$SELF" || true; } | crontab -
-        echo "расписание снято"; exit 0 ;;
+        echo "${C_GRN}расписание снято${C_R}"; exit 0 ;;
     check-remote)
         [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
         [[ -f "$SSH_KEY" ]] || die "нет ключа $SSH_KEY"
-        if path="$(remote_path)"; then echo "доступ к $(dest_host) (порт $SSH_PORT) есть, копии будут в $path"; exit 0; fi
+        if path="$(remote_path)"; then echo "${C_GRN}доступ к $(dest_host) (порт $SSH_PORT) есть, копии будут в $path${C_R}"; exit 0; fi
         die "нет доступа к $(dest_host) (порт $SSH_PORT) по ключу $SSH_KEY" ;;
     remote-cmds)
         [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
         ensure_key; remote_cmds; exit 0 ;;
 esac
 
+# ================================================================ меню
+# Запуск без параметров в терминале — меню. Каждый пункт запускает этот же скрипт в нужном режиме
+# (SB_NO_MENU=1 — чтобы «сделать копию» не открыло меню снова).
+menu_status() {
+    local cron last n
+    lbl() { local t="$1"; printf "  %s%*s " "$t" $((16 - ${#t})) ""; }  # подпись по числу букв, не байт
+    cron="$(crontab -l 2>/dev/null | grep -F "$SELF" | grep -v '^\s*#' | head -1 || true)"
+    echo "${C_B}${C_BLU}╭──────────────────────────────────────────────────────────╮${C_R}"
+    printf "${C_B}${C_BLU}│${C_R}  ${C_B}Резервные копии${C_R} · ${C_CYN}%-38s${C_R}${C_B}${C_BLU}│${C_R}\n" "$HOST"
+    echo "${C_B}${C_BLU}╰──────────────────────────────────────────────────────────╯${C_R}"
+    if [[ -n "$cron" ]]; then
+        lbl "Расписание:"; printf "${C_GRN}каждый день в %02d:%02d${C_R} ${C_D}(по часам сервера)${C_R}\n" "$((10#$(awk '{print $2}' <<< "$cron")))" "$((10#$(awk '{print $1}' <<< "$cron")))"
+    else
+        lbl "Расписание:"; printf "${C_YEL}не стоит${C_R}\n"
+    fi
+    if [[ -n "$DEST" ]]; then
+        lbl "Сервер копий:"; printf "${C_GRN}%s${C_R} ${C_D}(хранить %s)${C_R}\n" "$DEST" "$KEEP_REMOTE"
+    else
+        lbl "Сервер копий:"; printf "${C_YEL}не настроен — копии только здесь${C_R}\n"
+    fi
+    case "$TG_MODE" in
+        off) lbl "Telegram:"; printf "${C_YEL}выключен${C_R}\n" ;;
+        *) lbl "Telegram:"; printf "${C_GRN}%s${C_R}, %s\n" "$([[ $TG_MODE == bot ]] && echo 'бот магазина' || echo 'свой бот')" \
+               "$([[ $TG_NOTIFY == all ]] && echo 'после каждой копии' || echo 'только об ошибках')" ;;
+    esac
+    last="$(ls -t "$OUT_DIR"/server-backup-*.tgz 2>/dev/null | head -1 || true)"
+    n="$(ls "$OUT_DIR"/server-backup-*.tgz 2>/dev/null | wc -l || true)"
+    if [[ -n "$last" ]]; then
+        lbl "Последняя копия:"; printf "${C_GRN}%s${C_R} ${C_D}(%s, %s; здесь копий: %s из %s)${C_R}\n" "$(basename "$last")" \
+            "$(du -h "$last" | cut -f1)" "$(date -r "$last" '+%d.%m %H:%M')" "$n" "$KEEP_LOCAL"
+    else
+        lbl "Последняя копия:"; printf "${C_YEL}копий ещё нет${C_R}\n"
+    fi
+    if [[ -n "${ONLY_PROJECTS// /}" ]]; then lbl "Что копируем:"; printf "${C_MAG}только: %s${C_R}\n" "$(echo $ONLY_PROJECTS)"; fi
+}
+menu_item() { printf "   ${C_B}${C_CYN}%2s${C_R}  %s\n" "$1" "$2"; }
+menu_run() {  # menu_run ПАРАМЕТРЫ… — этот же скрипт в нужном режиме; MENU_RC — его код
+    echo
+    MENU_RC=0
+    SB_NO_MENU=1 bash "$SELF" "$@" || MENU_RC=$?
+    (( MENU_RC == 0 )) || echo "${C_RED}Завершилось с ошибкой (код $MENU_RC).${C_R}"
+    return 0
+}
+menu_projects() {  # список проектов compose на этом сервере
+    docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | grep -v '^$' | sort -u || true
+}
+menu_once() {  # разовая копия: только / без проектов, дополнительные пути, без отправки
+    local projects=() i a args=() p
+    mapfile -t projects < <(menu_projects)
+    echo
+    echo "${C_B}Разовая копия${C_R} ${C_D}(настройки в backup.conf не меняются)${C_R}"
+    if (( ${#projects[@]} )); then
+        echo "Проекты docker compose на этом сервере:"
+        for i in "${!projects[@]}"; do printf "   ${C_CYN}%2d${C_R}  %s\n" "$((i + 1))" "${projects[$i]}"; done
+        read -r -p "Копировать только эти проекты — номера через пробел (Enter — весь сервер): " a
+        for i in $a; do [[ "$i" =~ ^[0-9]+$ ]] && p="${projects[$((i - 1))]:-}" && [[ -n "$p" ]] && args+=(--only "$p"); done
+        if (( ${#args[@]} == 0 )); then
+            read -r -p "Не включать проекты — номера через пробел (Enter — ничего не исключать): " a
+            for i in $a; do [[ "$i" =~ ^[0-9]+$ ]] && p="${projects[$((i - 1))]:-}" && [[ -n "$p" ]] && args+=(--skip "$p"); done
+        fi
+    fi
+    read -r -p "Добавить файлы или папки — полные пути через пробел (Enter — нет): " a
+    for p in $a; do args+=(--add "$p"); done
+    if [[ -n "$DEST" ]]; then
+        read -r -p "Отправить копию на $DEST? [Y/n] " a
+        [[ "$a" =~ ^[NnНн] ]] && args+=(--no-upload)
+    fi
+    read -r -p "Посмотреть сначала, что попадёт в копию? [y/N] " a
+    if [[ "$a" =~ ^[YyДд] ]]; then
+        menu_run --plan "${args[@]}"
+        read -r -p "Делать копию? [Y/n] " a
+        [[ "$a" =~ ^[NnНн] ]] && return 0
+    fi
+    menu_run "${args[@]}"
+}
+if (( ARGC == 0 )) && [[ -t 0 && -t 1 && -z "${SB_NO_MENU:-}" ]]; then
+    while true; do
+        clear 2>/dev/null || true
+        menu_status
+        echo
+        echo "  ${C_B}${C_MAG}Копия${C_R}"
+        menu_item 1 "Сделать копию сейчас"
+        menu_item 2 "Сделать копию без отправки на сервер копий"
+        menu_item 3 "Разовая копия: выбрать проекты, добавить файлы"
+        menu_item 4 "Показать, что попадёт в копию ${C_D}(ничего не копирует)${C_R}"
+        echo "  ${C_B}${C_MAG}Настройка${C_R}"
+        menu_item 5 "Настроить: время, хранение, сервер копий, Telegram"
+        menu_item 6 "Поставить расписание из настроек"
+        menu_item 7 "Снять расписание"
+        echo "  ${C_B}${C_MAG}Сервер копий и уведомления${C_R}"
+        menu_item 8 "Проверить доступ к серверу копий"
+        menu_item 9 "Команды для настройки сервера копий"
+        menu_item 10 "Отправить проверочное сообщение в Telegram"
+        echo
+        menu_item 0 "Выход"
+        echo
+        read -r -p "${C_B}Выберите пункт:${C_R} " choice || exit 0
+        case "$choice" in
+            1) menu_run ;;
+            2) menu_run --no-upload ;;
+            3) menu_once ;;
+            4) menu_run --plan ;;
+            5) menu_run --setup ;;
+            6) menu_run --apply-cron ;;
+            7) read -r -p "Снять расписание — копии по cron перестанут делаться? [y/N] " a
+               [[ "$a" =~ ^[YyДд] ]] && menu_run --remove-cron ;;
+            8) menu_run --check-remote ;;
+            9) menu_run --remote-cmds ;;
+            10) menu_run --test-notify ;;
+            0|q|Q|й|Й) exit 0 ;;
+            *) echo "${C_YEL}Нет такого пункта.${C_R}" ;;
+        esac
+        echo
+        read -r -p "${C_D}Enter — вернуться в меню${C_R} " _ || exit 0
+        # настройки могли поменяться
+        # shellcheck disable=SC1090
+        [[ -f "$CONF" ]] && source "$CONF"
+        REMOTE_DIR="${REMOTE_DIR:-$(hostname)}"
+        DEST=""; [[ -z "$REMOTE_HOST" ]] || DEST="$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR"
+    done
+fi
+
 # ================================================================ настройка
 if [[ "$MODE" == setup ]]; then
-    [[ -t 0 ]] || die "--setup нужно запускать в терминале"
+    [[ -t 0 ]] || die "настройку нужно запускать в терминале: bash $SELF → «Настроить»"
     ask() { local a; read -r -p "$1 [$2]: " a; echo "${a:-$2}"; }
     msk2srv() { date -d "@$(TZ=Europe/Moscow date -d "today $1" +%s)" +%H:%M; }
     srv2msk() { TZ=Europe/Moscow date -d "@$(date -d "today $1" +%s)" +%H:%M; }
@@ -259,7 +384,7 @@ if [[ "$MODE" == setup ]]; then
     fi
 
     {
-        echo "# Настройки backup.sh. Меняются через: bash $SELF --setup"
+        echo "# Настройки backup.sh. Меняются через меню: bash $SELF → «Настроить»"
         printf 'CRON_TIME=%q\nKEEP_LOCAL=%q\nOUT_DIR=%q\n' "$CRON_TIME" "$KEEP_LOCAL" "$OUT_DIR"
         printf 'REMOTE_HOST=%q\nREMOTE_USER=%q\nREMOTE_DIR=%q\nSSH_PORT=%q\nKEEP_REMOTE=%q\nSSH_KEY=%q\n' \
             "$REMOTE_HOST" "$REMOTE_USER" "$REMOTE_DIR" "$SSH_PORT" "$KEEP_REMOTE" "$SSH_KEY"
@@ -285,11 +410,11 @@ if [[ "$MODE" == setup ]]; then
     echo
     read -r -p "Сделать первую копию сейчас? [Y/n] " a
     [[ "$a" =~ ^[NnНн] ]] && exit 0
-    exec bash "$SELF"
+    SB_NO_MENU=1 exec bash "$SELF"
 fi
 
 if [[ "$MODE" == test-notify ]]; then
-    tg_send "🔔 Проверка уведомлений резервных копий $HOST" && echo "отправлено" || die "Telegram не принял сообщение (TG_MODE=$TG_MODE)"
+    tg_send "🔔 Проверка уведомлений резервных копий $HOST" && echo "${C_GRN}отправлено${C_R}" || die "Telegram не принял сообщение (TG_MODE=$TG_MODE)"
     exit 0
 fi
 
@@ -321,7 +446,7 @@ if [[ "$MODE" == backup ]]; then
     if [[ -f "$LOG" ]] && (( $(stat -c %s "$LOG") > 5242880 )); then
         tail -n 3000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
     fi
-    exec > >(tee -a "$LOG" "$RUNLOG") 2>&1
+    exec > >(tee >(nocolor | tee -a "$LOG" "$RUNLOG" >/dev/null)) 2>&1
     echo; echo "################ $(date '+%Y-%m-%d %H:%M:%S %Z') — резервная копия $HOST"
     write_status running "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
@@ -329,14 +454,14 @@ fi
 on_exit() {
     local rc=$?
     if [[ "$MODE" == backup ]] && (( rc )); then
-        write_status failed "failed_at=${FAILED_AT:-?}" "code=$rc" "error=$(tail -n 3 "$RUNLOG" 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
+        write_status failed "failed_at=${FAILED_AT:-?}" "code=$rc" "error=$(tail -n 3 "$RUNLOG" 2>/dev/null | nocolor | tr '\n' ' ' | cut -c1-300)"
     fi
     if [[ "$MODE" == backup ]] && (( rc )) && [[ "$TG_MODE" != off ]]; then
         sleep 1
         tg_send "❌ Резервная копия $HOST НЕ сделана
 Шаг: ${FAILED_AT:-?}, код $rc
 
-$(tail -n 8 "$RUNLOG" 2>/dev/null | cut -c1-200)
+$(tail -n 8 "$RUNLOG" 2>/dev/null | nocolor | cut -c1-200)
 
 Лог: $LOG" || true
     fi
@@ -605,7 +730,7 @@ if [[ -d /root/.ssh ]]; then
 fi
 fi  # разделы всего сервера
 for p in $EXTRA_PATHS; do
-    [[ -e "$p" ]] || { warn "$p (из --add/EXTRA_PATHS) не найден"; continue; }
+    [[ -e "$p" ]] || { warn "$p (дополнительный путь) не найден"; continue; }
     item "Дополнительно: $p — $(human "$p")"; add_path "$p"
 done
 
@@ -618,7 +743,7 @@ TAR_EX=(--exclude='*.log' --anchored --no-wildcards-match-slash
 for e in "${EXCLUDES[@]}" $(printf '%s\n' "${SKIP_DIRS[@]}" | sort -u); do TAR_EX+=("--exclude=${e#/}"); done
 echo
 if (( ONLY )); then
-    echo "Только проекты:${ONLY_PROJECTS}${EXTRA_PATHS:+ и дополнительные пути}. Остальное на сервере не копируется"
+    echo "Только проекты: ${ONLY_PROJECTS}${EXTRA_PATHS:+ и дополнительные пути}. Остальное на сервере не копируется"
     echo "(другие проекты, /opt, сайты, сертификаты, cron, /root/.ssh)."
 else
     echo "Не кладу: логи, папки backup(s) внутри /opt (старые дампы и архивы других скриптов),"
@@ -633,13 +758,13 @@ echo "Архив: $OUT_DIR/$NAME.tgz, хранится последних коп
 if [[ -n "$DEST" ]] && (( UPLOAD )); then
     echo "Отправка: $DEST (порт $SSH_PORT), там хранится последних копий: $KEEP_REMOTE"
 else
-    echo "Отправка на другой сервер: $([[ -n "$DEST" ]] && echo 'отключена (--no-upload)' || echo "не настроена (bash $SELF --setup)")"
+    echo "Отправка на другой сервер: $([[ -n "$DEST" ]] && echo 'в этот раз не отправляется' || echo "не настроена (bash $SELF → «Настроить»)")"
 fi
 echo "Telegram: $([[ $TG_MODE == off ]] && echo выключен || { [[ $TG_NOTIFY == all ]] && echo 'после каждой копии' || echo 'только об ошибках'; })"
 
 if [[ "$MODE" == plan ]]; then
     echo
-    echo "Режим --plan: ничего не скопировано."
+    echo "${C_B}Режим просмотра: ничего не скопировано.${C_R}"
     exit 0
 fi
 
@@ -731,7 +856,7 @@ SFTP
     echo "  там хранится копий: $REMOTE_N (из $KEEP_REMOTE)"
     UPLOADED="☁️ Копия на $host: есть (там $REMOTE_N из $KEEP_REMOTE)"
 elif (( UPLOAD )); then
-    warn "отправка на другой сервер не настроена — копия только здесь (bash $SELF --setup)"
+    warn "отправка на другой сервер не настроена — копия только здесь (bash $SELF → «Настроить»)"
 fi
 FAILED_AT=""
 write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=${UPLOADED:+$(dest_host):$(dest_dir)}" \
@@ -750,4 +875,4 @@ ${UPLOADED:-⚠️ На другой сервер не отправлялась}
     tg_send "$msg" || echo "  ! Telegram не принял сообщение"
 fi
 echo
-echo "Готово."
+echo "${C_B}${C_GRN}Готово.${C_R}"
