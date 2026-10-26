@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Восстановление сервера из архива backup.sh на ЧИСТОМ сервере (Ubuntu/Debian).
-# Запуск:  bash restore.sh /root/server-backup-<сервер>-<время>.tgz [параметры]
+# Запуск:  bash restore.sh — меню: выбор архива, проверка плана, восстановление с запуском или без.
 #
+# Служебные параметры (для программ; в меню есть всё то же):
+#   bash restore.sh АРХИВ [--check] [--yes] [--force] [--no-start]
 #   --check    только показать, что будет сделано (ничего не меняет)
 #   --yes      не задавать вопросов (кроме установки docker)
 #   --force    продолжить, даже если на сервере уже есть контейнеры с такими именами
@@ -14,23 +16,30 @@
 # базы PostgreSQL из дампов → запуск всего → cron → проверка доменов.
 set -euo pipefail
 
-ARCHIVE=""; CHECK_ONLY=0; YES=0; FORCE=0; NO_START=0
+ARCHIVE=""; CHECK_ONLY=0; YES=0; FORCE=0; NO_START=0; ARGC=$#
+SELF="$(realpath "$0")"
 while (( $# )); do
     case "$1" in
         --check) CHECK_ONLY=1 ;;
         --yes) YES=1 ;;
         --force) FORCE=1 ;;
         --no-start) NO_START=1 ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
-        -*) echo "Неизвестный параметр: $1" >&2; exit 1 ;;
+        -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;
+        -*) echo "Неизвестный параметр: $1 (запустите без параметров — откроется меню)" >&2; exit 1 ;;
         *) ARCHIVE="$1" ;;
     esac
     shift
 done
 
-step() { echo; echo "==> $*"; }
-warn() { echo "  ! $*"; }
-die() { echo; echo "ОШИБКА: $*" >&2; exit 1; }
+# Цвета — только в терминале. Имена с C_: R и B у скрипта заняты (папки распаковки).
+if [[ -t 1 ]]; then
+    C_R=$'\e[0m' C_B=$'\e[1m' C_D=$'\e[2m' C_RED=$'\e[31m' C_GRN=$'\e[32m' C_YEL=$'\e[33m' C_BLU=$'\e[34m' C_MAG=$'\e[35m' C_CYN=$'\e[36m'
+else
+    C_R="" C_B="" C_D="" C_RED="" C_GRN="" C_YEL="" C_BLU="" C_MAG="" C_CYN=""
+fi
+step() { echo; echo "${C_B}${C_CYN}==>${C_R}${C_B} $*${C_R}"; }
+warn() { echo "  ${C_YEL}! $*${C_R}"; }
+die() { echo; echo "${C_B}${C_RED}ОШИБКА:${C_R}${C_RED} $*${C_R}" >&2; exit 1; }
 confirm() {
     (( YES )) && return 0
     read -r -p "$1 [y/N] " ans
@@ -38,7 +47,84 @@ confirm() {
 }
 
 [[ $EUID -eq 0 ]] || die "запустите от root"
-[[ -n "$ARCHIVE" && -f "$ARCHIVE" ]] || die "укажите архив: bash $0 /root/server-backup-….tgz"
+
+# ================================================================ меню
+# Без параметров в терминале: выбрать архив, потом действие. Действие запускает этот же скрипт
+# с архивом и нужными параметрами (SB_NO_MENU=1 — без меню).
+menu_archives() {  # архивы backup.sh на этом сервере, новые первыми
+    ls -t /root/server-backup-*.tgz /root/backups/server-backup-*.tgz ./server-backup-*.tgz 2>/dev/null \
+        | while read -r f; do realpath "$f"; done | awk '!seen[$0]++' || true
+}
+menu_pick() {  # → ARCHIVE
+    local list=() i a
+    mapfile -t list < <(menu_archives)
+    echo
+    if (( ${#list[@]} )); then
+        echo "${C_B}Архивы на этом сервере:${C_R}"
+        for i in "${!list[@]}"; do
+            printf "   ${C_B}${C_CYN}%2d${C_R}  %s ${C_D}(%s, %s)${C_R}\n" "$((i + 1))" "${list[$i]}" "$(du -h "${list[$i]}" | cut -f1)" "$(date -r "${list[$i]}" '+%d.%m.%Y %H:%M')"
+        done
+        read -r -p "Номер архива или полный путь к другому (0 — выход): " a || exit 0
+    else
+        echo "${C_YEL}Архивов server-backup-*.tgz в /root и /root/backups нет.${C_R}"
+        read -r -p "Полный путь к архиву (Enter — выход): " a || exit 0
+    fi
+    case "$a" in
+        ""|0) exit 0 ;;
+        *[!0-9]*) ARCHIVE="$a" ;;
+        *) ARCHIVE="${list[$((a - 1))]:-}" ;;
+    esac
+    [[ -n "$ARCHIVE" && -f "$ARCHIVE" ]] || { echo "${C_RED}Нет такого архива: ${a}${C_R}"; ARCHIVE=""; }
+}
+menu_run() {  # menu_run ПАРАМЕТРЫ… — этот же скрипт с выбранным архивом
+    echo
+    local rc=0
+    SB_NO_MENU=1 bash "$SELF" "$ARCHIVE" "$@" || rc=$?
+    (( rc == 0 )) || echo "${C_RED}Завершилось с ошибкой (код $rc).${C_R}"
+    return 0
+}
+menu_item() { printf "   ${C_B}${C_CYN}%2s${C_R}  %s\n" "$1" "$2"; }
+if (( ARGC == 0 )) && [[ -t 0 && -t 1 && -z "${SB_NO_MENU:-}" ]]; then
+    clear 2>/dev/null || true
+    echo "${C_B}${C_BLU}╭──────────────────────────────────────────────────────────╮${C_R}"
+    printf "${C_B}${C_BLU}│${C_R}  ${C_B}Восстановление сервера${C_R} · ${C_CYN}%-31s${C_R}${C_B}${C_BLU}│${C_R}\n" "$(hostname)"
+    echo "${C_B}${C_BLU}╰──────────────────────────────────────────────────────────╯${C_R}"
+    while [[ -z "$ARCHIVE" ]]; do menu_pick; done
+    while true; do
+        echo
+        echo "  ${C_B}Архив:${C_R} ${C_GRN}${ARCHIVE}${C_R} ${C_D}($(du -h "$ARCHIVE" | cut -f1), $(date -r "$ARCHIVE" '+%d.%m.%Y %H:%M'))${C_R}"
+        if docker ps -aq 2>/dev/null | grep -q .; then
+            echo "  ${C_YEL}На этом сервере уже есть контейнеры docker: $(docker ps -a --format '{{.Names}}' | head -5 | xargs)…${C_R}"
+        fi
+        echo
+        echo "  ${C_B}${C_MAG}Проверка${C_R}"
+        menu_item 1 "Показать план восстановления ${C_D}(ничего не меняет)${C_R}"
+        echo "  ${C_B}${C_MAG}Восстановление${C_R}"
+        menu_item 2 "Восстановить и запустить всё"
+        menu_item 3 "Восстановить без запуска ${C_D}(перенос заранее, пока старый сервер главный)${C_R}"
+        menu_item 4 "Восстановить, даже если такие контейнеры уже есть ${C_D}(базы с данными не перезаписываются)${C_R}"
+        echo
+        menu_item 5 "Выбрать другой архив"
+        menu_item 0 "Выход"
+        echo
+        read -r -p "${C_B}Выберите пункт:${C_R} " choice || exit 0
+        case "$choice" in
+            1) menu_run --check ;;
+            2) read -r -p "Восстановить из архива и запустить все сервисы на этом сервере? [y/N] " a
+               [[ "$a" =~ ^[YyДд] ]] && menu_run ;;
+            3) read -r -p "Восстановить из архива, ничего не запуская? [y/N] " a
+               [[ "$a" =~ ^[YyДд] ]] && menu_run --no-start ;;
+            4) read -r -p "Без запуска сервисов? [y/N] " a
+               if [[ "$a" =~ ^[YyДд] ]]; then menu_run --force --no-start; else menu_run --force; fi ;;
+            5) ARCHIVE=""; while [[ -z "$ARCHIVE" ]]; do menu_pick; done ;;
+            0|q|Q|й|Й) exit 0 ;;
+            *) echo "${C_YEL}Нет такого пункта.${C_R}" ;;
+        esac
+        echo
+        read -r -p "${C_D}Enter — вернуться в меню${C_R} " _ || exit 0
+    done
+fi
+[[ -n "$ARCHIVE" && -f "$ARCHIVE" ]] || die "укажите архив: bash $SELF — откроется меню"
 
 # ================================================================ архив
 step "Архив $ARCHIVE"
@@ -82,7 +168,7 @@ if command -v docker >/dev/null 2>&1; then
     if [[ -n "$busy" ]]; then
         warn "на сервере уже есть контейнеры: $busy"
         (( FORCE )) || die "сервер не чистый. Восстановление рассчитано на новый сервер.
-Если вы уверены (например, всё остановлено и базы пустые) — запустите с --force."
+Если вы уверены (например, всё остановлено и базы пустые) — меню → «Восстановить, даже если такие контейнеры уже есть»."
     fi
 fi
 NEW_IPS="$(hostname -I | xargs)"
@@ -101,7 +187,7 @@ done < "$B/volumes/list.txt"
 
 if (( CHECK_ONLY )); then
     echo
-    echo "Режим --check: ничего не изменено (архив распакован в $R — можно удалить)."
+    echo "${C_B}Режим проверки: ничего не изменено${C_R} (архив распакован в $R — можно удалить)."
     exit 0
 fi
 echo
@@ -211,12 +297,12 @@ while IFS='|' read -r c proj svc user db pgv; do
 done < "$B/db/list.txt"
 
 if (( NO_START )); then
-    step "Без запуска (--no-start)"
+    step "Без запуска"
     in_order stop >/dev/null 2>&1 || true
     docker ps -a --format '{{.Names}}|{{.Status}}' | grep -Ff <(cut -d'|' -f1 "$B/containers.txt") \
         | sed -e 's/|/   /' -e 's/^/  /'
     echo
-    echo "Всё восстановлено, контейнеры созданы и остановлены, cron не ставился."
+    echo "${C_B}${C_GRN}Всё восстановлено, контейнеры созданы и остановлены, cron не ставился.${C_R}"
     echo "Распакованная копия: $R. Запуск, когда старый сервер остановлен:"
     echo "  каждый проект: cd ПАПКА && docker compose up -d  (сначала панель — она создаёт сеть)"
     echo "  cron из копии: $B/crontab.txt"
@@ -263,7 +349,7 @@ done
 echo "  (444/000 у панели и подписок без секретной cookie — это нормально)"
 
 echo
-echo "Восстановление завершено. Распакованная копия: $R (удалите после проверки)."
+echo "${C_B}${C_GRN}Восстановление завершено.${C_R} Распакованная копия: $R (удалите после проверки)."
 echo
 echo "Осталось:"
 if [[ " $NEW_IPS " != *" $(mf ips | awk '{print $1}') "* ]]; then
