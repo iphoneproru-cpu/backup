@@ -233,3 +233,15 @@ tar -xzf server-backup-….tgz -O --wildcards '*/SUMMARY.txt'
 crontab -l | grep -v '# server-backup' | crontab -
 rm -rf /opt/server-backup /root/backups /var/log/server-backup.log
 ```
+
+## Ключ Claude для бота магазина и сайта
+
+`claude-shop.py` — что можно делать ключом `claude-shop`: git в `/opt/remnashop-src`, сборка и перезапуск
+`remnashop`, `remnashop-taskiq-worker`, `remnashop-taskiq-scheduler`, их логи, файлы сайта `/var/www/my.chebur.xyz`
+(с резервными копиями в `/var/backups/site-my.chebur.xyz` и откатом). Remnawave, nginx, базы, `.env` и любые другие
+команды ключом недоступны. Полный список — в начале `claude-shop.py`, журнал — `/var/log/claude-shop.log`.
+
+```bash
+bash /opt/server-backup/claude-shop-install.sh            # поставить или обновить
+bash /opt/server-backup/claude-shop-install.sh --remove   # убрать ключ
+```
