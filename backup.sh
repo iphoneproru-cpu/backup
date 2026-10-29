@@ -868,7 +868,7 @@ elif (( UPLOAD )); then
 fi
 FAILED_AT=""
 write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=${UPLOADED:+$(dest_host):$(dest_dir)}" \
-    "local_count=$LOCAL_N" "warnings=$(printf '%s; ' "${WARNINGS[@]}" | sed 's/; $//')"
+    "local_count=$LOCAL_N" "local_dir=$OUT_DIR" "warnings=$(printf '%s; ' "${WARNINGS[@]}" | sed 's/; $//')"
 push_status
 
 # ================================================================ отчёт
