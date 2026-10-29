@@ -189,8 +189,15 @@ remote_cmds() {
     else d="\$H/$REMOTE_DIR"; own="chown -R $REMOTE_USER: \"$d\""; fi
     echo "set -e
 id $REMOTE_USER >/dev/null 2>&1 || useradd -m -s /usr/sbin/nologin $REMOTE_USER
-H=\$(getent passwd $REMOTE_USER | cut -d: -f6)
-mkdir -p \"\$H/.ssh\" \"$d\"
+H=\$(getent passwd $REMOTE_USER | cut -d: -f6)"
+    # Логин, запертый в своей папке (ChrootDirectory, как у storage-setup.sh), путей сервера не видит.
+    [[ "$REMOTE_DIR" == /* ]] && echo "CH=\$(sshd -T -C user=$REMOTE_USER,host=localhost,addr=127.0.0.1 2>/dev/null | awk '/^chrootdirectory/ {print \$2}')
+if [ -n \"\$CH\" ] && [ \"\$CH\" != none ]; then
+  echo \"$REMOTE_USER заперт в своей папке (chroot \$CH): полный путь $REMOTE_DIR ему не виден.\"
+  echo \"В настройках бэкапа укажите для этого сервера имя папки, например copies. Ничего не изменено.\"
+  exit 1
+fi"
+    echo "mkdir -p \"\$H/.ssh\" \"$d\"
 touch \"\$H/.ssh/authorized_keys\"
 grep -qF '$(echo "$pub" | awk '{print $2}')' \"\$H/.ssh/authorized_keys\" || echo '$auth' >> \"\$H/.ssh/authorized_keys\"
 chmod 700 \"\$H/.ssh\"; chmod 600 \"\$H/.ssh/authorized_keys\"
