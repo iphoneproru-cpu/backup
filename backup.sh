@@ -24,7 +24,7 @@ CRON_TIME="00:30"        # время запуска по часам серве�
 KEEP_LOCAL=7             # сколько копий хранить на этом сервере
 REMOTE_HOST=""           # IP или домен сервера для копий; пусто — не отправлять
 REMOTE_USER="backup"     # пользователь там (ему разрешена только загрузка файлов)
-REMOTE_DIR=""            # папка там (относительно домашней); по умолчанию — имя этого сервера
+REMOTE_DIR=""            # папка там: имя — внутри домашней папки логина, /путь — полный путь; по умолчанию — имя этого сервера
 SSH_PORT=22
 KEEP_REMOTE=30           # сколько копий этого сервера хранить там
 SSH_KEY="/root/.ssh/server_backup_ed25519"  # один ключ на все серверы копий
@@ -141,22 +141,36 @@ remote_path() {
     local home
     home="$(echo "pwd" | sftp $(sftp_opts) -o StrictHostKeyChecking=accept-new -b - "$(dest_host)" 2>/dev/null \
         | sed -n 's/^Remote working directory: //p')"
-    [[ -n "$home" ]] && echo "${home%/}/$REMOTE_DIR"
+    [[ -n "$home" ]] || return 1
+    if [[ "$REMOTE_DIR" == /* ]]; then echo "$REMOTE_DIR"; else echo "${home%/}/$REMOTE_DIR"; fi
+}
+# Полный путь там: не меньше двух уровней (/srv/backups) и без системных папок.
+remote_dir_ok() {
+    [[ -n "$1" && "$1" != *..* ]] || return 1
+    if [[ "$1" == /* ]]; then
+        [[ "$1" =~ ^(/[A-Za-z0-9._-]+){2,}/?$ && ! "$1" =~ ^/(etc|bin|sbin|usr|lib|lib64|boot|dev|proc|sys|run|root)(/|$) ]]
+    else
+        [[ "$1" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]
+    fi
 }
 
 # ================================================================ общее для --setup и режимов без вопросов
 # remote_cmds: команды для сервера копий (выполнить там под root): пользователь без shell, папка, ключ только для sftp.
 remote_cmds() {
-    local pub auth; pub="$(cat "$SSH_KEY.pub")"; auth="restrict,command=\"internal-sftp\" $pub"
+    local pub auth d own; pub="$(cat "$SSH_KEY.pub")"; auth="restrict,command=\"internal-sftp\" $pub"
+    # Папка внутри домашней — целиком пользователю; полный путь — только сама папка (не родительские).
+    if [[ "$REMOTE_DIR" == /* ]]; then d="$REMOTE_DIR"; own="chown $REMOTE_USER: \"$d\"; chmod 700 \"$d\""
+    else d="\$H/$REMOTE_DIR"; own="chown -R $REMOTE_USER: \"$d\""; fi
     echo "set -e
 id $REMOTE_USER >/dev/null 2>&1 || useradd -m -s /usr/sbin/nologin $REMOTE_USER
 H=\$(getent passwd $REMOTE_USER | cut -d: -f6)
-mkdir -p \"\$H/.ssh\" \"\$H/$REMOTE_DIR\"
+mkdir -p \"\$H/.ssh\" \"$d\"
 touch \"\$H/.ssh/authorized_keys\"
 grep -qF '$(echo "$pub" | awk '{print $2}')' \"\$H/.ssh/authorized_keys\" || echo '$auth' >> \"\$H/.ssh/authorized_keys\"
 chmod 700 \"\$H/.ssh\"; chmod 600 \"\$H/.ssh/authorized_keys\"
-chown -R $REMOTE_USER: \"\$H/.ssh\" \"\$H/$REMOTE_DIR\"
-echo \"готово: \$H/$REMOTE_DIR\""
+chown -R $REMOTE_USER: \"\$H/.ssh\"
+$own
+echo \"готово: $d\""
 }
 # ensure_key: ключ для отправки копий (без пароля — для cron).
 ensure_key() {
@@ -367,9 +381,12 @@ if [[ "$MODE" == setup ]]; then
             echo "   → копии в /home/backup/$HOST на $REMOTE_HOST."
             REMOTE_USER="$(ask "   ЛОГИН пользователя на $REMOTE_HOST (создам, если нет)" "$REMOTE_USER")"
             [[ "$REMOTE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "логин: латиница, цифры, - и _, например backup"
-            REMOTE_DIR="$(ask "   ПОДПАПКА для копий в домашней папке $REMOTE_USER" "$REMOTE_DIR")"
-            [[ -n "$REMOTE_DIR" && "$REMOTE_DIR" != /* ]] || die "подпапка: имя без / в начале, например $HOST"
-            echo "   → копии будут в ~$REMOTE_USER/$REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER); точный путь покажу после проверки доступа"
+            echo "   Папка для копий: имя — подпапка в домашней папке $REMOTE_USER (например $HOST),"
+            echo "   или полный путь с / в начале (например /srv/backups/$HOST)."
+            REMOTE_DIR="$(ask "   ПАПКА для копий на $REMOTE_HOST" "$REMOTE_DIR")"
+            remote_dir_ok "$REMOTE_DIR" || die "папка: имя без пробелов или полный путь (/srv/backups/$HOST), не системная папка"
+            if [[ "$REMOTE_DIR" == /* ]]; then echo "   → копии будут в $REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER)"
+            else echo "   → копии будут в ~$REMOTE_USER/$REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER); точный путь покажу после проверки доступа"; fi
             KEEP_REMOTE="$(ask "   Сколько копий хранить там" "$KEEP_REMOTE")"
             [[ "$KEEP_REMOTE" =~ ^[1-9][0-9]*$ ]] || die "нужно число"
 
@@ -930,7 +947,7 @@ put $ARCHIVE $dir/$NAME.tgz.part
 rename $dir/$NAME.tgz.part $dir/$NAME.tgz
 SFTP
 }
-UPLOADED=""; UPLOADED_TO=""; UPLOADED_PATHS=""; UP_FAIL=()
+UPLOADED=""; UPLOADED_TO=""; UPLOADED_PATHS=""; UPLOADED_COUNTS=""; UP_FAIL=()
 if (( UPLOAD )) && [[ -n "$DEST" ]]; then
     for i in "${!D_HOST[@]}"; do
         use_dest "$i"
@@ -955,6 +972,7 @@ if (( UPLOAD )) && [[ -n "$DEST" ]]; then
         UPLOADED_TO+="${UPLOADED_TO:+, }$host:$dir"
         # Где копии там на самом деле: домашняя папка + dir; у пользователя в chroot это «/dir».
         UPLOADED_PATHS+="${UPLOADED_PATHS:+, }$host:$(remote_path || echo "?")"
+        UPLOADED_COUNTS+="${UPLOADED_COUNTS:+, }$host:$REMOTE_N"
     done
 elif (( UPLOAD )); then
     warn "отправка на другой сервер не настроена — копия только здесь (bash $SELF → «Настроить»)"
@@ -964,7 +982,7 @@ if (( ${#UP_FAIL[@]} )); then
     die "копия сделана, но не отправлена на: ${UP_FAIL[*]}${UPLOADED_TO:+ (отправлена на $UPLOADED_TO)}"
 fi
 FAILED_AT=""
-write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=$UPLOADED_TO" "remote_paths=$UPLOADED_PATHS" \
+write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=$UPLOADED_TO" "remote_paths=$UPLOADED_PATHS" "remote_counts=$UPLOADED_COUNTS" \
     "local_count=$LOCAL_N" "local_dir=$OUT_DIR" "warnings=$(printf '%s; ' "${WARNINGS[@]}" | sed 's/; $//')"
 push_status
 
