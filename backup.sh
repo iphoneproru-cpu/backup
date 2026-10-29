@@ -8,7 +8,7 @@
 # Без терминала (cron) тот же запуск сразу делает копию. Ключи ниже — служебные, для cron и
 # агента RemnaDiag; человеку они не нужны, всё есть в меню:
 #   --setup --plan --no-upload --only П --skip П --add ПУТЬ --apply-cron --remove-cron
-#   --check-remote --remote-cmds --test-notify
+#   --check-remote --remote-cmds [--host H --port P --user U --dir D] --test-notify
 #
 # Настройки: backup.conf рядом со скриптом. Лог: /var/log/server-backup.log.
 # Восстановление на чистом сервере: restore.sh (лежит рядом и внутри каждого архива).
@@ -73,7 +73,7 @@ load_conf() {
 }
 load_conf
 
-MODE="backup"; UPLOAD=1; ARGC=$#
+MODE="backup"; UPLOAD=1; ARGC=$#; ONE_HOST=""; ONE_PORT=""; ONE_USER=""; ONE_DIR=""
 while (( $# )); do
     case "$1" in
         --setup) MODE="setup" ;;
@@ -87,11 +87,22 @@ while (( $# )); do
         --check-remote) MODE="check-remote" ;;
         --remote-cmds) MODE="remote-cmds" ;;
         --add) EXTRA_PATHS+=" $2"; shift ;;
+        --host) ONE_HOST="$2"; shift ;;
+        --port) ONE_PORT="$2"; shift ;;
+        --user) ONE_USER="$2"; shift ;;
+        --dir) ONE_DIR="$2"; shift ;;
         -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;
         *) echo "Неизвестный параметр: $1 (запустите без параметров — откроется меню)" >&2; exit 1 ;;
     esac
     shift
 done
+# --host …: проверка доступа и команды только для этого сервера копий, с этими значениями (из формы
+# RemnaDiag, ещё не сохранённые в backup.conf).
+if [[ -n "$ONE_HOST" ]]; then
+    [[ "$MODE" == check-remote || "$MODE" == remote-cmds ]] || { echo "--host — только с --check-remote или --remote-cmds" >&2; exit 1; }
+    D_HOST=("$ONE_HOST"); D_PORT=("${ONE_PORT:-22}"); D_USER=("${ONE_USER:-backup}"); D_DIR=("${ONE_DIR:-$(hostname)}"); D_KEEP=("$KEEP_REMOTE")
+    dests_line
+fi
 # без повторов: проект из backup.conf, выбранный ещё раз разово
 ONLY_PROJECTS="$(printf '%s\n' $ONLY_PROJECTS | awk 'NF && !seen[$0]++' | xargs || true)"
 SKIP_PROJECTS="$(printf '%s\n' $SKIP_PROJECTS | awk 'NF && !seen[$0]++' | xargs || true)"
