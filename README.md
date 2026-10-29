@@ -46,6 +46,7 @@
 | Папки хоста, подключённые в контейнеры | например `/var/www/<сайт>`, `/etc/letsencrypt` |
 | Сертификаты | `/root/.acme.sh`, `/etc/letsencrypt` |
 | Расписания и доступы | crontab root, свои файлы `/etc/cron.d`, правила ufw, `/root/.ssh` |
+| Программы | список пакетов apt, поставленных вручную (`packages.txt`); restore.sh предложит доустановить недостающие (например, socat для acme.sh) |
 | Версии образов | digest каждого образа — при восстановлении берутся те же версии |
 
 **Не попадает:** логи, папки `backup`/`backups` внутри `/opt` (старые дампы и архивы других
@@ -181,7 +182,7 @@ db/*.dump          дампы PostgreSQL + db/list.txt
 redis/*.rdb        данные valkey
 volumes/*.tgz      именованные тома
 files.tgz          файлы (/opt, /var/www, сертификаты, /root/.ssh, …)
-crontab.txt, ufw.txt
+crontab.txt, ufw.txt, packages.txt
 backup.sh, restore.sh
 ```
 

@@ -732,6 +732,11 @@ if command -v ufw >/dev/null; then
     ufw status numbered > "$B/ufw.txt" 2>&1 || true
     line "ufw: $(head -1 "$B/ufw.txt" | sed 's/Status: //'), правил: $(grep -c '^\[' "$B/ufw.txt" || true) (для справки при переезде)"
 fi
+if command -v apt-mark >/dev/null; then
+    # Пакеты apt в файлы копии не входят: restore.sh сверит этот список и предложит доустановить недостающие.
+    apt-mark showmanual 2>/dev/null | sort > "$B/packages.txt" || true
+    line "программы apt, поставленные вручную: $(grep -c '' "$B/packages.txt" || true) (restore.sh предложит недостающие)"
+fi
 if [[ -d /root/.ssh ]]; then
     line "/root/.ssh: ключи доступа и деплой-ключи (пар ключей: $(find /root/.ssh -maxdepth 1 -type f -name '*.pub' | wc -l))"
     add_path /root/.ssh

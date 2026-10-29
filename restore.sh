@@ -136,6 +136,17 @@ B="$(find "$R" -mindepth 1 -maxdepth 1 -type d -name 'server-backup-*' | head -1
     || die "это не архив backup.sh (нет MANIFEST / containers.txt / files.tgz)"
 [[ ! -f "$B/SUMMARY.txt" ]] || { echo; sed -n '3,200p' "$B/SUMMARY.txt" | sed '/^Не кладу/,$d'; echo; }
 mf() { grep -E "^$1=" "$B/MANIFEST" | cut -d= -f2-; }
+# Программы apt из копии, которых нет на этом сервере. Ядро, прошивки и наборы Ubuntu у каждого
+# сервера свои — их не сверяем.
+missing_packages() {
+    [[ -s "$B/packages.txt" ]] && command -v dpkg-query >/dev/null || return 0
+    local p
+    while read -r p; do
+        [[ -n "$p" ]] || continue
+        [[ "$p" =~ ^(linux-|ubuntu-|language-pack-|grub|shim|cloud-|netplan|initramfs|ifupdown$|.*-microcode$) ]] && continue
+        dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || echo "$p"
+    done < "$B/packages.txt"
+}
 echo "сделан: $(mf created_utc) UTC на $(mf hostname) ($(mf ips))"
 [[ -z "$(mf bot_commit)" ]] || echo "бот: ветка $(mf bot_branch), коммит $(mf bot_commit | cut -c1-7)"
 echo "распакован в $R"
@@ -173,6 +184,11 @@ if command -v docker >/dev/null 2>&1; then
 fi
 NEW_IPS="$(hostname -I | xargs)"
 echo "IP этого сервера: $NEW_IPS (в копии: $(mf ips))"
+if [[ -s "$B/packages.txt" ]]; then
+    NEED_PKGS="$(missing_packages | xargs)"
+    if [[ -n "$NEED_PKGS" ]]; then warn "программ из копии нет здесь: $NEED_PKGS (предложу установить после файлов)"
+    else echo "программы apt из копии: все есть"; fi
+fi
 
 step "Базы и данные"
 while IFS='|' read -r c proj svc user db pgv; do
@@ -295,6 +311,29 @@ while IFS='|' read -r c proj svc user db pgv; do
         "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
     echo "  $c: база $db восстановлена, таблиц: $tables"
 done < "$B/db/list.txt"
+
+# ================================================================ программы
+if [[ -n "${NEED_PKGS:-}" ]]; then
+    step "Программы (apt)"
+    echo "  есть на старом сервере, нет здесь: $NEED_PKGS"
+    echo "  (например, socat нужен acme.sh для продления сертификатов)"
+    if confirm "Установить их?"; then
+        apt-get update -qq >"$R/apt.log" 2>&1 || true
+        avail=()
+        for p in $NEED_PKGS; do
+            if apt-cache show "$p" >/dev/null 2>&1; then avail+=("$p"); else warn "$p: нет в репозиториях этой системы"; fi
+        done
+        if (( ${#avail[@]} )); then
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${avail[@]}" >>"$R/apt.log" 2>&1; then
+                echo "  установлены: ${avail[*]}"
+            else
+                warn "apt-get завершился с ошибкой, подробности: $R/apt.log"
+            fi
+        fi
+    else
+        echo "  пропущено; список: $B/packages.txt"
+    fi
+fi
 
 if (( NO_START )); then
     step "Без запуска"
