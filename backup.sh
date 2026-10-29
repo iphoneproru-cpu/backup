@@ -930,7 +930,7 @@ put $ARCHIVE $dir/$NAME.tgz.part
 rename $dir/$NAME.tgz.part $dir/$NAME.tgz
 SFTP
 }
-UPLOADED=""; UPLOADED_TO=""; UP_FAIL=()
+UPLOADED=""; UPLOADED_TO=""; UPLOADED_PATHS=""; UP_FAIL=()
 if (( UPLOAD )) && [[ -n "$DEST" ]]; then
     for i in "${!D_HOST[@]}"; do
         use_dest "$i"
@@ -953,6 +953,8 @@ if (( UPLOAD )) && [[ -n "$DEST" ]]; then
         echo "  там хранится копий: $REMOTE_N (из $KEEP_REMOTE)"
         UPLOADED+="${UPLOADED:+$'\n'}☁️ Копия на $host: есть (там $REMOTE_N из $KEEP_REMOTE)"
         UPLOADED_TO+="${UPLOADED_TO:+, }$host:$dir"
+        # Где копии там на самом деле: домашняя папка + dir; у пользователя в chroot это «/dir».
+        UPLOADED_PATHS+="${UPLOADED_PATHS:+, }$host:$(remote_path || echo "?")"
     done
 elif (( UPLOAD )); then
     warn "отправка на другой сервер не настроена — копия только здесь (bash $SELF → «Настроить»)"
@@ -962,7 +964,7 @@ if (( ${#UP_FAIL[@]} )); then
     die "копия сделана, но не отправлена на: ${UP_FAIL[*]}${UPLOADED_TO:+ (отправлена на $UPLOADED_TO)}"
 fi
 FAILED_AT=""
-write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=$UPLOADED_TO" \
+write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=$UPLOADED_TO" "remote_paths=$UPLOADED_PATHS" \
     "local_count=$LOCAL_N" "local_dir=$OUT_DIR" "warnings=$(printf '%s; ' "${WARNINGS[@]}" | sed 's/; $//')"
 push_status
 
