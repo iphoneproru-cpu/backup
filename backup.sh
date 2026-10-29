@@ -144,6 +144,32 @@ remote_path() {
     [[ -n "$home" ]] || return 1
     if [[ "$REMOTE_DIR" == /* ]]; then echo "$REMOTE_DIR"; else echo "${home%/}/$REMOTE_DIR"; fi
 }
+# dest_check: на текущем сервере копий есть вход, папка (создаётся, если логину можно) и запись в неё.
+# Печатает итог; 1 — копии туда не лягут, с объяснением почему.
+dest_check() {
+    local home full t out
+    home="$(echo "pwd" | sftp $(sftp_opts) -o StrictHostKeyChecking=accept-new -b - "$(dest_host)" 2>/dev/null \
+        | sed -n 's/^Remote working directory: //p')"
+    if [[ -z "$home" ]]; then echo "${C_RED}нет доступа к $(dest_host) (порт $SSH_PORT) по ключу $SSH_KEY${C_R}"; return 1; fi
+    if [[ "$REMOTE_DIR" == /* ]]; then full="$REMOTE_DIR"; else full="${home%/}/$REMOTE_DIR"; fi
+    t="$(mktemp)"; echo "server-backup check" > "$t"
+    out="$(printf -- '-mkdir %s\nput %s %s/.check-%s\nrm %s/.check-%s\n' "$REMOTE_DIR" "$t" "$REMOTE_DIR" "$HOST" "$REMOTE_DIR" "$HOST" \
+        | sftp $(sftp_opts) -b - "$(dest_host)" 2>&1)" && {
+        rm -f "$t"
+        echo "${C_GRN}доступ к $(dest_host) (порт $SSH_PORT) есть, копии будут в $full${C_R}$([[ "$home" == / ]] && echo " (логин заперт в своей папке: это путь внутри неё)")"
+        return 0
+    }
+    rm -f "$t"
+    echo "${C_RED}$(dest_host): вход есть, но в папку $REMOTE_DIR записать нельзя${C_R}"
+    if [[ "$REMOTE_DIR" == /* && "$home" == / ]]; then
+        echo "  логин заперт в своей папке (chroot) и не видит путей сервера: укажите имя папки, например copies"
+    else
+        echo "  папки $full нет или она не принадлежит $REMOTE_USER: выполните на $REMOTE_HOST под root"
+        echo "  «Команды для сервера копий» — они создадут папку и отдадут её логину"
+    fi
+    echo "$out" | grep -viE '^sftp>|^\s*$' | head -2 | sed 's/^/  sftp: /'
+    return 1
+}
 # Полный путь там: не меньше двух уровней (/srv/backups) и без системных папок.
 remote_dir_ok() {
     [[ -n "$1" && "$1" != *..* ]] || return 1
@@ -199,8 +225,7 @@ case "$MODE" in
         bad=0
         for i in "${!D_HOST[@]}"; do
             use_dest "$i"
-            if path="$(remote_path)"; then echo "${C_GRN}доступ к $(dest_host) (порт $SSH_PORT) есть, копии будут в $path${C_R}"
-            else echo "${C_RED}нет доступа к $(dest_host) (порт $SSH_PORT) по ключу $SSH_KEY${C_R}"; bad=1; fi
+            dest_check || bad=1
         done
         exit "$bad" ;;
     remote-cmds)
@@ -424,8 +449,7 @@ if [[ "$MODE" == setup ]]; then
                 esac
             done
             if [[ -n "$REMOTE_HOST" ]]; then
-                printf -- '-mkdir %s\n' "$REMOTE_DIR" | sftp $(sftp_opts) -b - "$(dest_host)" >/dev/null 2>&1 || true
-                echo "   доступ есть: копии будут в $(remote_path || echo "~$REMOTE_USER/$REMOTE_DIR") на $REMOTE_HOST"
+                dest_check | sed 's/^/   /' || echo "   ! копии туда пока не лягут — исправьте и проверьте снова (меню → «Проверить доступ»)"
                 if ssh -n -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" true >/dev/null 2>&1 \
                     && [[ "$(ssh -n -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" echo shell 2>/dev/null)" == shell ]]; then
                     echo "   ! этим ключом там доступна командная строка — лучше ограничить ключ (вариант 2 покажет как)"
@@ -955,6 +979,7 @@ if (( UPLOAD )) && [[ -n "$DEST" ]]; then
         step "Отправка на $host:$dir"
         if ! upload_one; then
             warn "не отправлено на $host (порт $SSH_PORT)"
+            dest_check | tail -n +2 | sed 's/^/  /' || true
             UP_FAIL+=("$host"); UPLOADED+="${UPLOADED:+$'\n'}❌ Копия на $host: не отправлена"
             continue
         fi
