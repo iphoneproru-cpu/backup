@@ -27,7 +27,10 @@ REMOTE_USER="backup"     # пользователь там (ему разреш�
 REMOTE_DIR=""            # папка там (относительно домашней); по умолчанию — имя этого сервера
 SSH_PORT=22
 KEEP_REMOTE=30           # сколько копий этого сервера хранить там
-SSH_KEY="/root/.ssh/server_backup_ed25519"
+SSH_KEY="/root/.ssh/server_backup_ed25519"  # один ключ на все серверы копий
+# Ещё серверы копий — копия уходит на каждый: REMOTE2_HOST, REMOTE2_USER, REMOTE2_DIR, REMOTE2_PORT,
+# REMOTE2_KEEP, затем REMOTE3_… (всего не больше MAX_DESTS). Пустые USER/DIR/PORT/KEEP — как выше.
+MAX_DESTS=5
 TG_MODE="bot"            # bot — бот магазина владельцу; custom — TG_TOKEN/TG_CHAT; off
 TG_TOKEN=""
 TG_CHAT=""
@@ -37,10 +40,38 @@ ONLY_PROJECTS=""         # если задано — только эти про�
 EXTRA_PATHS=""
 STATUS_FILE=""           # итог каждой копии (key=value) для внешних программ; пусто — $OUT_DIR/.last-run
 LOG="/var/log/server-backup.log"
-# shellcheck disable=SC1090
-[[ -f "$CONF" ]] && source "$CONF"
-REMOTE_DIR="${REMOTE_DIR:-$(hostname)}"
-DEST=""; [[ -z "$REMOTE_HOST" ]] || DEST="$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR"
+# Серверы копий по порядку: D_HOST/D_PORT/D_USER/D_DIR/D_KEEP[i]; первый — из REMOTE_*, дальше — REMOTE2_* …
+# DEST — все они одной строкой «логин@сервер:папка, …» (пусто — никуда не отправлять).
+load_dests() {
+    local i v h
+    D_HOST=(); D_PORT=(); D_USER=(); D_DIR=(); D_KEEP=()
+    for (( i = 1; i <= MAX_DESTS; i++ )); do
+        if (( i == 1 )); then
+            [[ -n "$REMOTE_HOST" ]] || continue
+            D_HOST+=("$REMOTE_HOST"); D_PORT+=("$SSH_PORT"); D_USER+=("$REMOTE_USER"); D_DIR+=("$REMOTE_DIR"); D_KEEP+=("$KEEP_REMOTE")
+            continue
+        fi
+        v="REMOTE${i}_HOST"; h="${!v:-}"; [[ -n "$h" ]] || continue
+        D_HOST+=("$h")
+        v="REMOTE${i}_PORT"; D_PORT+=("${!v:-22}")
+        v="REMOTE${i}_USER"; D_USER+=("${!v:-backup}")
+        v="REMOTE${i}_DIR"; D_DIR+=("${!v:-$(hostname)}")
+        v="REMOTE${i}_KEEP"; D_KEEP+=("${!v:-$KEEP_REMOTE}")
+    done
+    dests_line
+}
+dests_line() { local i; DEST=""; for i in "${!D_HOST[@]}"; do DEST+="${DEST:+, }${D_USER[$i]}@${D_HOST[$i]}:${D_DIR[$i]}"; done; }
+# use_dest N: сделать N-й сервер копий текущим (REMOTE_HOST и др. — для функций ниже)
+use_dest() { REMOTE_HOST="${D_HOST[$1]}"; SSH_PORT="${D_PORT[$1]}"; REMOTE_USER="${D_USER[$1]}"; REMOTE_DIR="${D_DIR[$1]}"; KEEP_REMOTE="${D_KEEP[$1]}"; }
+load_conf() {
+    local i
+    for (( i = 2; i <= MAX_DESTS; i++ )); do unset "REMOTE${i}_HOST" "REMOTE${i}_PORT" "REMOTE${i}_USER" "REMOTE${i}_DIR" "REMOTE${i}_KEEP"; done
+    # shellcheck disable=SC1090
+    [[ -f "$CONF" ]] && source "$CONF"
+    REMOTE_DIR="${REMOTE_DIR:-$(hostname)}"
+    load_dests
+}
+load_conf
 
 MODE="backup"; UPLOAD=1; ARGC=$#
 while (( $# )); do
@@ -149,20 +180,31 @@ case "$MODE" in
         { crontab -l 2>/dev/null | grep -vF "$SELF" || true; } | crontab -
         echo "${C_GRN}расписание снято${C_R}"; exit 0 ;;
     check-remote)
-        [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
+        (( ${#D_HOST[@]} )) || die "сервер копий не задан (REMOTE_HOST)"
         [[ -f "$SSH_KEY" ]] || die "нет ключа $SSH_KEY"
-        if path="$(remote_path)"; then echo "${C_GRN}доступ к $(dest_host) (порт $SSH_PORT) есть, копии будут в $path${C_R}"; exit 0; fi
-        die "нет доступа к $(dest_host) (порт $SSH_PORT) по ключу $SSH_KEY" ;;
+        bad=0
+        for i in "${!D_HOST[@]}"; do
+            use_dest "$i"
+            if path="$(remote_path)"; then echo "${C_GRN}доступ к $(dest_host) (порт $SSH_PORT) есть, копии будут в $path${C_R}"
+            else echo "${C_RED}нет доступа к $(dest_host) (порт $SSH_PORT) по ключу $SSH_KEY${C_R}"; bad=1; fi
+        done
+        exit "$bad" ;;
     remote-cmds)
-        [[ -n "$REMOTE_HOST" ]] || die "сервер копий не задан (REMOTE_HOST)"
-        ensure_key; remote_cmds; exit 0 ;;
+        (( ${#D_HOST[@]} )) || die "сервер копий не задан (REMOTE_HOST)"
+        ensure_key
+        for i in "${!D_HOST[@]}"; do
+            use_dest "$i"
+            (( ${#D_HOST[@]} == 1 )) || echo "# ===== сервер копий $((i + 1)): $REMOTE_HOST — выполнить там под root"
+            remote_cmds
+        done
+        exit 0 ;;
 esac
 
 # ================================================================ меню
 # Запуск без параметров в терминале — меню. Каждый пункт запускает этот же скрипт в нужном режиме
 # (SB_NO_MENU=1 — чтобы «сделать копию» не открыло меню снова).
 menu_status() {
-    local cron last n
+    local cron last n i
     lbl() { local t="$1"; printf "  %s%*s " "$t" $((16 - ${#t})) ""; }  # подпись по числу букв, не байт
     cron="$(crontab -l 2>/dev/null | grep -F "$SELF" | grep -v '^\s*#' | head -1 || true)"
     echo "${C_B}${C_BLU}╭──────────────────────────────────────────────────────────╮${C_R}"
@@ -173,8 +215,11 @@ menu_status() {
     else
         lbl "Расписание:"; printf "${C_YEL}не стоит${C_R}\n"
     fi
-    if [[ -n "$DEST" ]]; then
-        lbl "Сервер копий:"; printf "${C_GRN}%s${C_R} ${C_D}(хранить %s)${C_R}\n" "$DEST" "$KEEP_REMOTE"
+    if (( ${#D_HOST[@]} )); then
+        for i in "${!D_HOST[@]}"; do
+            if (( i )); then lbl ""; elif (( ${#D_HOST[@]} > 1 )); then lbl "Серверы копий:"; else lbl "Сервер копий:"; fi
+            printf "${C_GRN}%s${C_R} ${C_D}(хранить %s)${C_R}\n" "${D_USER[$i]}@${D_HOST[$i]}:${D_DIR[$i]}" "${D_KEEP[$i]}"
+        done
     else
         lbl "Сервер копий:"; printf "${C_YEL}не настроен — копии только здесь${C_R}\n"
     fi
@@ -222,7 +267,7 @@ menu_once() {  # разовая копия: только / без проекто
     read -r -p "Добавить файлы или папки — полные пути через пробел (Enter — нет): " a
     for p in $a; do args+=(--add "$p"); done
     if [[ -n "$DEST" ]]; then
-        read -r -p "Отправить копию на $DEST? [Y/n] " a
+        read -r -p "Отправить копию на серверы копий ($DEST)? [Y/n] " a
         [[ "$a" =~ ^[NnНн] ]] && args+=(--no-upload)
     fi
     read -r -p "Посмотреть сначала, что попадёт в копию? [y/N] " a
@@ -272,11 +317,7 @@ if (( ARGC == 0 )) && [[ -t 0 && -t 1 && -z "${SB_NO_MENU:-}" ]]; then
         esac
         echo
         read -r -p "${C_D}Enter — вернуться в меню${C_R} " _ || exit 0
-        # настройки могли поменяться
-        # shellcheck disable=SC1090
-        [[ -f "$CONF" ]] && source "$CONF"
-        REMOTE_DIR="${REMOTE_DIR:-$(hostname)}"
-        DEST=""; [[ -z "$REMOTE_HOST" ]] || DEST="$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR"
+        load_conf  # настройки могли поменяться
     done
 fi
 
@@ -302,63 +343,85 @@ if [[ "$MODE" == setup ]]; then
     KEEP_LOCAL="$(ask "   Сколько последних копий хранить в $OUT_DIR" "$KEEP_LOCAL")"
     [[ "$KEEP_LOCAL" =~ ^[1-9][0-9]*$ ]] || die "нужно число"
 
-    echo; echo "3) Копия на другой сервер (по SSH/SFTP)"
-    echo "   Пусто или «-» — не отправлять, хранить копии только здесь."
-    a="$(ask "   IP или домен сервера для копий" "${REMOTE_HOST:--}")"; [[ "$a" == - ]] && a=""; REMOTE_HOST="$a"
-    if [[ -n "$REMOTE_HOST" ]]; then
-        SSH_PORT="$(ask "   Порт SSH" "$SSH_PORT")"
+    echo; echo "3) Копии на другие серверы (по SSH/SFTP)"
+    echo "   Копия уходит на каждый указанный сервер (до $MAX_DESTS). Пусто или «-» — убрать сервер;"
+    echo "   если ни одного нет — копии хранятся только здесь."
+    N_HOST=(); N_PORT=(); N_USER=(); N_DIR=(); N_KEEP=(); key_done=0; i=0
+    while (( i < MAX_DESTS )); do
+        if (( i < ${#D_HOST[@]} )); then use_dest "$i"
+        else REMOTE_HOST=""; SSH_PORT=22; REMOTE_USER="${N_USER[0]:-${D_USER[0]:-backup}}"; REMOTE_DIR="$HOST"; KEEP_REMOTE="${N_KEEP[0]:-${D_KEEP[0]:-$KEEP_REMOTE}}"; fi
         echo
-        echo "   На сервере $REMOTE_HOST копии будут лежать у отдельного пользователя (логин),"
-        echo "   в его домашней папке (обычно /home/логин), в подпапке. Например: логин backup, подпапка $HOST"
-        echo "   → копии в /home/backup/$HOST на $REMOTE_HOST."
-        REMOTE_USER="$(ask "   ЛОГИН пользователя на $REMOTE_HOST (создам, если нет)" "$REMOTE_USER")"
-        [[ "$REMOTE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "логин: латиница, цифры, - и _, например backup"
-        REMOTE_DIR="$(ask "   ПОДПАПКА для копий в домашней папке $REMOTE_USER" "$REMOTE_DIR")"
-        [[ -n "$REMOTE_DIR" && "$REMOTE_DIR" != /* ]] || die "подпапка: имя без / в начале, например $HOST"
-        echo "   → копии будут в ~$REMOTE_USER/$REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER); точный путь покажу после проверки доступа"
-        KEEP_REMOTE="$(ask "   Сколько копий хранить там" "$KEEP_REMOTE")"
-        [[ "$KEEP_REMOTE" =~ ^[1-9][0-9]*$ ]] || die "нужно число"
-
-        echo
-        echo "   SSH-ключ, которым этот сервер заходит туда:"
-        echo "   1 — отдельный ключ для копий $SSH_KEY ($([[ -f "$SSH_KEY" ]] && echo есть || echo 'будет создан'))"
-        echo "   2 — указать свой файл ключа"
-        if [[ "$(ask "   Выбор" 1)" == 2 ]]; then
-            SSH_KEY="$(ask "   Путь к закрытому ключу" "$SSH_KEY")"
-            [[ -f "$SSH_KEY" ]] || die "нет файла $SSH_KEY"
-            [[ -f "$SSH_KEY.pub" ]] || ssh-keygen -y -f "$SSH_KEY" > "$SSH_KEY.pub" || die "не удалось прочитать ключ (с паролем ключ не подойдёт для cron)"
-        else
-            SSH_KEY="/root/.ssh/server_backup_ed25519"
-            [[ -f "$SSH_KEY" ]] || { ssh-keygen -t ed25519 -N "" -C "server-backup-$HOST" -f "$SSH_KEY" -q; echo "   ключ создан: $SSH_KEY"; }
+        if (( i == 0 )); then a="$(ask "   Сервер копий 1: IP или домен" "${REMOTE_HOST:--}")"
+        elif [[ -z "$REMOTE_HOST" ]]; then a="$(ask "   Ещё сервер копий $((i + 1)): IP или домен (Enter — больше не нужно)" -)"
+        else a="$(ask "   Сервер копий $((i + 1)): IP или домен (Enter — оставить, «-» — убрать)" "$REMOTE_HOST")"; fi
+        [[ "$a" == - ]] && a=""; REMOTE_HOST="$a"
+        if [[ -z "$REMOTE_HOST" ]]; then  # убран или не нужен: дальше — только если там ещё есть настроенные
+            (( i + 1 < ${#D_HOST[@]} )) || break
+            i=$((i + 1)); continue
         fi
-        REMOTE_CMDS="$(remote_cmds)"
-
-        echo
-        echo "   Проверяю доступ к $(dest_host) (порт $SSH_PORT)..."
-        until sftp_ok; do
-            echo "   Доступа пока нет. Как настроить тот сервер:"
-            echo "   1 — автоматически: зайду туда под root один раз (спросит пароль root того сервера),"
-            echo "       создам пользователя $REMOTE_USER без shell, папку $REMOTE_DIR и добавлю ключ"
-            echo "   2 — вручную: покажу команды, выполните их на том сервере под root"
-            echo "   3 — пропустить (копии не будут отправляться, пока не настроите)"
-            case "$(ask "   Выбор" 1)" in
-                1) ssh -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o PubkeyAuthentication=yes \
-                       "root@$REMOTE_HOST" "bash -s" <<< "$REMOTE_CMDS" || echo "   ! не получилось зайти под root" ;;
-                2) echo; echo "----- выполните на $REMOTE_HOST под root -----"; echo "$REMOTE_CMDS"; echo "-----"
-                   read -r -p "   Выполнили? Enter — проверить " _ ;;
-                *) echo "   отправка отключена до настройки доступа"; REMOTE_HOST=""; break ;;
-            esac
-        done
         if [[ -n "$REMOTE_HOST" ]]; then
-            printf -- '-mkdir %s\n' "$REMOTE_DIR" | sftp $(sftp_opts) -b - "$(dest_host)" >/dev/null 2>&1 || true
-            echo "   доступ есть: копии будут в $(remote_path || echo "~$REMOTE_USER/$REMOTE_DIR") на $REMOTE_HOST"
-            if ssh -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" true >/dev/null 2>&1 \
-                && [[ "$(ssh -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" echo shell 2>/dev/null)" == shell ]]; then
-                echo "   ! этим ключом там доступна командная строка — лучше ограничить ключ (вариант 2 покажет как)"
+            SSH_PORT="$(ask "   Порт SSH" "$SSH_PORT")"
+            echo
+            echo "   На сервере $REMOTE_HOST копии будут лежать у отдельного пользователя (логин),"
+            echo "   в его домашней папке (обычно /home/логин), в подпапке. Например: логин backup, подпапка $HOST"
+            echo "   → копии в /home/backup/$HOST на $REMOTE_HOST."
+            REMOTE_USER="$(ask "   ЛОГИН пользователя на $REMOTE_HOST (создам, если нет)" "$REMOTE_USER")"
+            [[ "$REMOTE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "логин: латиница, цифры, - и _, например backup"
+            REMOTE_DIR="$(ask "   ПОДПАПКА для копий в домашней папке $REMOTE_USER" "$REMOTE_DIR")"
+            [[ -n "$REMOTE_DIR" && "$REMOTE_DIR" != /* ]] || die "подпапка: имя без / в начале, например $HOST"
+            echo "   → копии будут в ~$REMOTE_USER/$REMOTE_DIR на $REMOTE_HOST (вход как $REMOTE_USER); точный путь покажу после проверки доступа"
+            KEEP_REMOTE="$(ask "   Сколько копий хранить там" "$KEEP_REMOTE")"
+            [[ "$KEEP_REMOTE" =~ ^[1-9][0-9]*$ ]] || die "нужно число"
+
+            if (( ! key_done )); then
+                echo
+                echo "   SSH-ключ, которым этот сервер заходит туда:"
+                echo "   1 — отдельный ключ для копий $SSH_KEY ($([[ -f "$SSH_KEY" ]] && echo есть || echo 'будет создан'))"
+                echo "   2 — указать свой файл ключа"
+                if [[ "$(ask "   Выбор" 1)" == 2 ]]; then
+                    SSH_KEY="$(ask "   Путь к закрытому ключу" "$SSH_KEY")"
+                    [[ -f "$SSH_KEY" ]] || die "нет файла $SSH_KEY"
+                    [[ -f "$SSH_KEY.pub" ]] || ssh-keygen -y -f "$SSH_KEY" > "$SSH_KEY.pub" || die "не удалось прочитать ключ (с паролем ключ не подойдёт для cron)"
+                else
+                    SSH_KEY="/root/.ssh/server_backup_ed25519"
+                    [[ -f "$SSH_KEY" ]] || { ssh-keygen -t ed25519 -N "" -C "server-backup-$HOST" -f "$SSH_KEY" -q; echo "   ключ создан: $SSH_KEY"; }
+                fi
+                key_done=1
+            fi
+            REMOTE_CMDS="$(remote_cmds)"
+
+            echo
+            echo "   Проверяю доступ к $(dest_host) (порт $SSH_PORT)..."
+            until sftp_ok; do
+                echo "   Доступа пока нет. Как настроить тот сервер:"
+                echo "   1 — автоматически: зайду туда под root один раз (спросит пароль root того сервера),"
+                echo "       создам пользователя $REMOTE_USER без shell, папку $REMOTE_DIR и добавлю ключ"
+                echo "   2 — вручную: покажу команды, выполните их на том сервере под root"
+                echo "   3 — пропустить (копии не будут отправляться, пока не настроите)"
+                case "$(ask "   Выбор" 1)" in
+                    1) ssh -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o PubkeyAuthentication=yes \
+                           "root@$REMOTE_HOST" "bash -s" <<< "$REMOTE_CMDS" || echo "   ! не получилось зайти под root" ;;
+                    2) echo; echo "----- выполните на $REMOTE_HOST под root -----"; echo "$REMOTE_CMDS"; echo "-----"
+                       read -r -p "   Выполнили? Enter — проверить " _ ;;
+                    *) echo "   отправка отключена до настройки доступа"; REMOTE_HOST=""; break ;;
+                esac
+            done
+            if [[ -n "$REMOTE_HOST" ]]; then
+                printf -- '-mkdir %s\n' "$REMOTE_DIR" | sftp $(sftp_opts) -b - "$(dest_host)" >/dev/null 2>&1 || true
+                echo "   доступ есть: копии будут в $(remote_path || echo "~$REMOTE_USER/$REMOTE_DIR") на $REMOTE_HOST"
+                if ssh -n -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" true >/dev/null 2>&1 \
+                    && [[ "$(ssh -n -p "$SSH_PORT" -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$(dest_host)" echo shell 2>/dev/null)" == shell ]]; then
+                    echo "   ! этим ключом там доступна командная строка — лучше ограничить ключ (вариант 2 покажет как)"
+                fi
             fi
         fi
-    fi
-    DEST=""; [[ -z "$REMOTE_HOST" ]] || DEST="$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR"
+        if [[ -n "$REMOTE_HOST" ]]; then
+            N_HOST+=("$REMOTE_HOST"); N_PORT+=("$SSH_PORT"); N_USER+=("$REMOTE_USER"); N_DIR+=("$REMOTE_DIR"); N_KEEP+=("$KEEP_REMOTE")
+        fi
+        i=$((i + 1))
+    done
+    D_HOST=("${N_HOST[@]}"); D_PORT=("${N_PORT[@]}"); D_USER=("${N_USER[@]}"); D_DIR=("${N_DIR[@]}"); D_KEEP=("${N_KEEP[@]}")
+    dests_line
 
     echo; echo "4) Уведомления в Telegram"
     TG_MODE=bot; bot_ok="не найден"; tg_creds && bot_ok="найден, владелец $CHAT"
@@ -376,7 +439,7 @@ if [[ "$MODE" == setup ]]; then
         case "$(ask "   Когда писать: 1 — после каждой копии, 2 — только при ошибке" "$([[ $TG_NOTIFY == errors ]] && echo 2 || echo 1)")" in
             2) TG_NOTIFY=errors ;; *) TG_NOTIFY=all ;;
         esac
-        if tg_send "🔧 Резервные копии $HOST настроены: каждый день в $t МСК, хранить $KEEP_LOCAL здесь${DEST:+ и $KEEP_REMOTE на $REMOTE_HOST}."; then
+        if tg_send "🔧 Резервные копии $HOST настроены: каждый день в $t МСК, хранить $KEEP_LOCAL здесь${DEST:+, отправлять на $DEST}."; then
             echo "   проверочное сообщение отправлено — проверьте Telegram"
         else
             echo "   ! Telegram не принял сообщение: проверьте токен и chat id (бот должен быть запущен через /start)"
@@ -386,8 +449,13 @@ if [[ "$MODE" == setup ]]; then
     {
         echo "# Настройки backup.sh. Меняются через меню: bash $SELF → «Настроить»"
         printf 'CRON_TIME=%q\nKEEP_LOCAL=%q\nOUT_DIR=%q\n' "$CRON_TIME" "$KEEP_LOCAL" "$OUT_DIR"
+        if (( ${#D_HOST[@]} )); then use_dest 0; else REMOTE_HOST=""; fi
         printf 'REMOTE_HOST=%q\nREMOTE_USER=%q\nREMOTE_DIR=%q\nSSH_PORT=%q\nKEEP_REMOTE=%q\nSSH_KEY=%q\n' \
             "$REMOTE_HOST" "$REMOTE_USER" "$REMOTE_DIR" "$SSH_PORT" "$KEEP_REMOTE" "$SSH_KEY"
+        for (( i = 1; i < ${#D_HOST[@]}; i++ )); do
+            printf 'REMOTE%d_HOST=%q\nREMOTE%d_USER=%q\nREMOTE%d_DIR=%q\nREMOTE%d_PORT=%q\nREMOTE%d_KEEP=%q\n' \
+                $((i + 1)) "${D_HOST[$i]}" $((i + 1)) "${D_USER[$i]}" $((i + 1)) "${D_DIR[$i]}" $((i + 1)) "${D_PORT[$i]}" $((i + 1)) "${D_KEEP[$i]}"
+        done
         printf 'TG_MODE=%q\nTG_TOKEN=%q\nTG_CHAT=%q\nTG_NOTIFY=%q\n' "$TG_MODE" "$TG_TOKEN" "$TG_CHAT" "$TG_NOTIFY"
         printf 'SKIP_PROJECTS=%q\nEXTRA_PATHS=%q\n' "$SKIP_PROJECTS" "$EXTRA_PATHS"
     } > "$CONF"
@@ -399,7 +467,8 @@ if [[ "$MODE" == setup ]]; then
     step "Готово"
     echo "  настройки: $CONF"
     echo "  cron:      $line"
-    echo "  копии:     $OUT_DIR (последние $KEEP_LOCAL)${DEST:+, на $DEST (последние $KEEP_REMOTE)}"
+    echo "  копии:     $OUT_DIR (последние $KEEP_LOCAL)"
+    for i in "${!D_HOST[@]}"; do echo "             ${D_USER[$i]}@${D_HOST[$i]}:${D_DIR[$i]} (последние ${D_KEEP[$i]})"; done
     echo "  Telegram:  $([[ $TG_MODE == off ]] && echo выключен || { [[ $TG_NOTIFY == all ]] && echo 'после каждой копии' || echo 'только об ошибках'; })"
     echo "  лог:       $LOG"
     if [[ -n "$others" ]]; then
@@ -433,10 +502,14 @@ write_status() {  # write_status СОСТОЯНИЕ [key=value ...]
         for kv in "$@"; do echo "${kv//$'\n'/ }"; done
     } > "$f.tmp" && mv "$f.tmp" "$f"
 }
-push_status() {  # итог — на сервер копий (если он настроен); ошибки не мешают копии
+push_status() {  # итог — на каждый сервер копий; ошибки не мешают копии
     [[ -n "$DEST" && -f "$STATUS_FILE" ]] || return 0
-    printf 'put %s %s/status-%s.txt\n' "$STATUS_FILE" "$(dest_dir)" "$HOST" \
-        | timeout 60 sftp $(sftp_opts) -b - "$(dest_host)" >/dev/null 2>&1 || true
+    local i
+    for i in "${!D_HOST[@]}"; do
+        use_dest "$i"
+        printf 'put %s %s/status-%s.txt\n' "$STATUS_FILE" "$(dest_dir)" "$HOST" \
+            | timeout 60 sftp $(sftp_opts) -b - "$(dest_host)" >/dev/null 2>&1 || true
+    done
 }
 
 WORK="$(mktemp -d)"
@@ -769,7 +842,9 @@ cat "$SUMMARY_FILE"
 echo
 echo "Архив: $OUT_DIR/$NAME.tgz, хранится последних копий: $KEEP_LOCAL"
 if [[ -n "$DEST" ]] && (( UPLOAD )); then
-    echo "Отправка: $DEST (порт $SSH_PORT), там хранится последних копий: $KEEP_REMOTE"
+    for i in "${!D_HOST[@]}"; do
+        echo "Отправка: ${D_USER[$i]}@${D_HOST[$i]}:${D_DIR[$i]} (порт ${D_PORT[$i]}), там хранится последних копий: ${D_KEEP[$i]}"
+    done
 else
     echo "Отправка на другой сервер: $([[ -n "$DEST" ]] && echo 'в этот раз не отправляется' || echo "не настроена (bash $SELF → «Настроить»)")"
 fi
@@ -845,34 +920,49 @@ LOCAL_N="$(ls -1 "$OUT_DIR"/server-backup-"$HOST"-*.tgz 2>/dev/null | wc -l)"
 echo "  здесь хранится копий: $LOCAL_N (из $KEEP_LOCAL)"
 
 # ================================================================ отправка и ротация там
-UPLOADED=""
-if (( UPLOAD )) && [[ -n "$DEST" ]]; then
-    step "Отправка на $DEST"
-    FAILED_AT="отправка на $(dest_host)"
-    host="$(dest_host)"; dir="$(dest_dir)"
+# Отправка на каждый сервер копий по очереди. Если какой-то не принял копию, остальные всё равно
+# её получают, а вся копия в итоге считается неудачной — чтобы пришло уведомление об ошибке.
+upload_one() {  # на текущий сервер копий (use_dest): host, dir; 1 — не отправлено
     # Под временным именем, затем переименование: недокачанный архив там не окажется.
     printf -- '-mkdir %s\n' "$dir" | sftp $(sftp_opts) -b - "$host" >/dev/null 2>&1 || true
-    sftp $(sftp_opts) -b - "$host" >/dev/null <<SFTP
+    sftp $(sftp_opts) -b - "$host" >/dev/null <<SFTP || return 1
 put $ARCHIVE $dir/$NAME.tgz.part
 rename $dir/$NAME.tgz.part $dir/$NAME.tgz
 SFTP
-    echo "  отправлено: $dir/$NAME.tgz"
-    FAILED_AT="ротация на $(dest_host)"
-    mapfile -t remote < <(echo "ls -1 $dir" | sftp $(sftp_opts) -b - "$host" 2>/dev/null \
-        | grep -oE "server-backup-$HOST-[0-9]{8}-[0-9]{6}\.tgz$" | sort)
-    old=$(( ${#remote[@]} - KEEP_REMOTE ))
-    if (( old > 0 )); then
-        for f in "${remote[@]:0:$old}"; do echo "-rm $dir/$f"; done | sftp $(sftp_opts) -b - "$host" >/dev/null 2>&1 || warn "не удалось удалить старые копии там"
-        echo "  удалено старых копий там: $old"
-    fi
-    REMOTE_N=$(( ${#remote[@]} - (old > 0 ? old : 0) ))
-    echo "  там хранится копий: $REMOTE_N (из $KEEP_REMOTE)"
-    UPLOADED="☁️ Копия на $host: есть (там $REMOTE_N из $KEEP_REMOTE)"
+}
+UPLOADED=""; UPLOADED_TO=""; UP_FAIL=()
+if (( UPLOAD )) && [[ -n "$DEST" ]]; then
+    for i in "${!D_HOST[@]}"; do
+        use_dest "$i"
+        host="$(dest_host)"; dir="$(dest_dir)"
+        step "Отправка на $host:$dir"
+        if ! upload_one; then
+            warn "не отправлено на $host (порт $SSH_PORT)"
+            UP_FAIL+=("$host"); UPLOADED+="${UPLOADED:+$'\n'}❌ Копия на $host: не отправлена"
+            continue
+        fi
+        echo "  отправлено: $dir/$NAME.tgz"
+        mapfile -t remote < <(echo "ls -1 $dir" | sftp $(sftp_opts) -b - "$host" 2>/dev/null \
+            | grep -oE "server-backup-$HOST-[0-9]{8}-[0-9]{6}\.tgz$" | sort)
+        old=$(( ${#remote[@]} - KEEP_REMOTE ))
+        if (( old > 0 )); then
+            for f in "${remote[@]:0:$old}"; do echo "-rm $dir/$f"; done | sftp $(sftp_opts) -b - "$host" >/dev/null 2>&1 || warn "не удалось удалить старые копии на $host"
+            echo "  удалено старых копий там: $old"
+        fi
+        REMOTE_N=$(( ${#remote[@]} - (old > 0 ? old : 0) ))
+        echo "  там хранится копий: $REMOTE_N (из $KEEP_REMOTE)"
+        UPLOADED+="${UPLOADED:+$'\n'}☁️ Копия на $host: есть (там $REMOTE_N из $KEEP_REMOTE)"
+        UPLOADED_TO+="${UPLOADED_TO:+, }$host:$dir"
+    done
 elif (( UPLOAD )); then
     warn "отправка на другой сервер не настроена — копия только здесь (bash $SELF → «Настроить»)"
 fi
+if (( ${#UP_FAIL[@]} )); then
+    FAILED_AT="отправка на ${UP_FAIL[*]}"
+    die "копия сделана, но не отправлена на: ${UP_FAIL[*]}${UPLOADED_TO:+ (отправлена на $UPLOADED_TO)}"
+fi
 FAILED_AT=""
-write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=${UPLOADED:+$(dest_host):$(dest_dir)}" \
+write_status ok "archive=$NAME.tgz" "size=$(stat -c %s "$ARCHIVE")" "uploaded=$UPLOADED_TO" \
     "local_count=$LOCAL_N" "local_dir=$OUT_DIR" "warnings=$(printf '%s; ' "${WARNINGS[@]}" | sed 's/; $//')"
 push_status
 
