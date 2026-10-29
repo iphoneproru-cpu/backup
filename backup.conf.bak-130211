@@ -1,0 +1,19 @@
+# Managed by RemnaDiag (dashboard → Бэкап). Manual changes are overwritten on save.
+CRON_TIME='01:00'
+KEEP_LOCAL=7
+OUT_DIR='/root/backups'
+STATUS_FILE='/root/backups/.last-run'
+REMOTE_HOST='185.114.49.21'
+REMOTE_USER='backup-diag'
+REMOTE_DIR='/srv/backups/remnadiag/copies'
+SSH_PORT=22
+KEEP_REMOTE=7
+SSH_KEY='/root/.ssh/server_backup_ed25519'
+REMOTE2_HOST='185.114.49.36'
+REMOTE2_USER='backup-diag'
+REMOTE2_DIR='/srv/backups/remnadiag/copies'
+REMOTE2_PORT=22
+REMOTE2_KEEP=7
+TG_MODE='off'  # reports come from the RemnaDiag bot
+ONLY_PROJECTS='remnadiag'
+EXTRA_PATHS=''
