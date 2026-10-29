@@ -193,12 +193,14 @@ remote_dir_ok() {
 
 # ================================================================ общее для --setup и режимов без вопросов
 # remote_cmds: команды для сервера копий (выполнить там под root): пользователь без shell, папка, ключ только для sftp.
+# Всё в ( … ): при вставке в терминал exit и set -e закрывают только эти скобки, а не сессию SSH.
 remote_cmds() {
     local pub auth d own; pub="$(cat "$SSH_KEY.pub")"; auth="restrict,command=\"internal-sftp\" $pub"
     # Папка внутри домашней — целиком пользователю; полный путь — только сама папка (не родительские).
     if [[ "$REMOTE_DIR" == /* ]]; then d="$REMOTE_DIR"; own="chown $REMOTE_USER: \"$d\"; chmod 700 \"$d\""
     else d="\$H/$REMOTE_DIR"; own="chown -R $REMOTE_USER: \"$d\""; fi
-    echo "set -e
+    echo "(
+set -e
 id $REMOTE_USER >/dev/null 2>&1 || useradd -m -s /usr/sbin/nologin $REMOTE_USER
 H=\$(getent passwd $REMOTE_USER | cut -d: -f6)"
     # Логин, запертый в своей папке (ChrootDirectory, как у storage-setup.sh), путей сервера не видит.
@@ -214,7 +216,8 @@ grep -qF '$(echo "$pub" | awk '{print $2}')' \"\$H/.ssh/authorized_keys\" || ech
 chmod 700 \"\$H/.ssh\"; chmod 600 \"\$H/.ssh/authorized_keys\"
 chown -R $REMOTE_USER: \"\$H/.ssh\"
 $own
-echo \"готово: $d\""
+echo \"готово: $d\"
+)"
 }
 # ensure_key: ключ для отправки копий (без пароля — для cron).
 ensure_key() {
