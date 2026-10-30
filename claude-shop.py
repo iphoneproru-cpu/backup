@@ -14,6 +14,8 @@
   shop up                   пересоздать remnashop, remnashop-taskiq-worker, remnashop-taskiq-scheduler (без БД и redis)
   shop restart [СЕРВИС…]    перезапустить их (все три или названные)
   shop logs СЕРВИС [N]      последние N строк лога (по умолчанию 200, не больше 5000)
+  shop avatar               сменить фото профиля бота на картинку из stdin (JPEG или PNG, до 10 МБ): setMyProfilePhoto
+                            внутри контейнера remnashop с его же токеном — токен не выводится и не покидает сервер
   site ls                   файлы сайта /var/www/my.chebur.xyz
   site get ФАЙЛ             содержимое файла
   site put ФАЙЛ             записать файл из stdin (до 10 МБ); старый — в резервную копию
@@ -125,6 +127,40 @@ def git_argv(cmd, args):
     deny(cmd, f"git {sub} не разрешён")
 
 
+# setMyProfilePhoto with the bot's own token (BOT_TOKEN in the container); the image comes on stdin.
+AVATAR_PY = """
+import asyncio, os, sys
+from aiogram import Bot
+from aiogram.types import BufferedInputFile, InputProfilePhotoStatic
+
+async def main():
+    data = sys.stdin.buffer.read()
+    bot = Bot(os.environ["BOT_TOKEN"])
+    try:
+        ok = await bot.set_my_profile_photo(photo=InputProfilePhotoStatic(photo=BufferedInputFile(data, "avatar.jpg")))
+        print("аватар бота обновлён" if ok else "Telegram ответил false")
+        return 0 if ok else 1
+    finally:
+        await bot.session.close()
+
+sys.exit(asyncio.run(main()))
+"""
+
+
+def avatar(cmd):
+    data = sys.stdin.buffer.read(MAX_PUT + 1)
+    if len(data) > MAX_PUT:
+        deny(cmd, "картинка больше 10 МБ")
+    if not (data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"):
+        deny(cmd, "нужна картинка JPEG или PNG в stdin")
+    log("OK", cmd)
+    argv = ["docker", "compose", "exec", "-T", "remnashop", "python", "-c", AVATAR_PY]
+    if DRY:
+        print(f"DRY: (cd {COMPOSE_DIR}) docker compose exec -T remnashop python -c <setMyProfilePhoto> ({len(data)} байт)")
+        return 0
+    return subprocess.run(argv, cwd=COMPOSE_DIR, input=data).returncode
+
+
 def shop_argv(cmd, args):
     dc = ["docker", "compose"]
     if args == ["ps"]:
@@ -143,7 +179,7 @@ def shop_argv(cmd, args):
         if not n.isdigit() or not 0 < int(n) <= 5000:
             deny(cmd, "число строк 1–5000")
         return dc + ["logs", "--no-color", "--tail", n, args[1]]
-    deny(cmd, "shop: ps | build | up | restart [сервис…] | logs сервис [N]")
+    deny(cmd, "shop: ps | build | up | restart [сервис…] | logs сервис [N] | avatar")
 
 
 def site_file(cmd, rel):
@@ -257,6 +293,8 @@ def main():
         a = git_argv(cmd, args)
         log("OK", cmd)
         return run(a, SRC)
+    if head == "shop" and args == ["avatar"]:
+        return avatar(cmd)
     if head == "shop":
         a = shop_argv(cmd, args)
         log("OK", cmd)
